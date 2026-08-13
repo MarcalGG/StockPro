@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 type ItemStatus = "Conferido" | "Divergente" | "Pendente";
-type ScanMode = "photo" | "key";
+type ScanMode = "photo" | "key" | "xml";
 type TabId = "Recebimento" | "Conferencia" | "Inventario" | "Relatorio";
 
 type InvoiceItem = {
@@ -94,11 +94,14 @@ export default function Home() {
   const [scannerTarget, setScannerTarget] = useState<"invoiceKey" | "newItemCode" | null>(null);
   const [cameraError, setCameraError] = useState("");
   const [notePhotoUrl, setNotePhotoUrl] = useState<string | null>(null);
+  const [xmlImportError, setXmlImportError] = useState("");
+  const [xmlPreview, setXmlPreview] = useState<ParsedNfe | null>(null);
   const hasHydrated = useRef(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const scanFrameRef = useRef<number | null>(null);
   const notePhotoInputRef = useRef<HTMLInputElement | null>(null);
+  const xmlFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const cleanInvoiceKey = invoiceKey.replace(/\D/g, "").slice(0, 44);
   const isInvoiceKeyComplete = cleanInvoiceKey.length === 44;
@@ -320,6 +323,77 @@ export default function Home() {
     setScanState("done");
   }
 
+  function handleXmlFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    setXmlImportError("");
+    setXmlPreview(null);
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = parseNfeXml(String(reader.result ?? ""));
+        if (parsed.items.length === 0) {
+          setXmlImportError(
+            "Nao encontrei produtos neste XML. Confira se e o arquivo certo da NF-e.",
+          );
+          return;
+        }
+        setXmlPreview(parsed);
+      } catch (error) {
+        setXmlImportError(
+          error instanceof Error ? error.message : "Nao foi possivel ler este arquivo XML.",
+        );
+      }
+    };
+    reader.onerror = () => setXmlImportError("Nao foi possivel ler o arquivo.");
+    reader.readAsText(file, "utf-8");
+  }
+
+  function confirmXmlImport() {
+    if (!xmlPreview) return;
+    if (items.length > 0) {
+      const confirmed = window.confirm(
+        `Ja existem ${items.length} item(ns) na conferencia. Importar do XML vai substituir a lista atual. Continuar?`,
+      );
+      if (!confirmed) return;
+    }
+
+    const importedItems: InvoiceItem[] = xmlPreview.items.map((item, index) => ({
+      id: nextItemId + index,
+      code: item.code || String(nextItemId + index),
+      product: item.product,
+      unit: item.unit,
+      expected: item.expected,
+      received: 0,
+      batch: item.batch,
+      validity: item.validity,
+      damaged: false,
+      note: "",
+      shortageFlag: false,
+      surplusFlag: false,
+      shortValidity: false,
+      missingBatchFlag: false,
+      status: "Pendente",
+    }));
+
+    setItems(importedItems);
+    setNextItemId((current) => current + importedItems.length);
+    if (xmlPreview.invoiceNumber) setInvoiceNumber(xmlPreview.invoiceNumber);
+    if (xmlPreview.supplier) setSupplier(xmlPreview.supplier);
+    if (xmlPreview.entryDateTime) setEntryDateTime(xmlPreview.entryDateTime);
+    if (xmlPreview.accessKey) setInvoiceKey(xmlPreview.accessKey);
+    setXmlPreview(null);
+    setActiveTab("Conferencia");
+  }
+
+  function cancelXmlPreview() {
+    setXmlPreview(null);
+    setXmlImportError("");
+  }
+
   function clearReceiving() {
     const confirmed = window.confirm(
       "Limpar o recebimento atual? Isso apaga a chave, os itens, quantidades e observacoes salvos neste navegador.",
@@ -345,6 +419,8 @@ export default function Home() {
       if (current) URL.revokeObjectURL(current);
       return null;
     });
+    setXmlPreview(null);
+    setXmlImportError("");
     try {
       window.localStorage.removeItem(STORAGE_KEY);
     } catch {
@@ -823,29 +899,29 @@ export default function Home() {
                     Capturar nota fiscal
                   </h2>
                   <p className="mt-2 text-sm leading-6 text-slate-600">
-                    Use a foto da nota em papel ou cole a chave de acesso com
-                    44 digitos para preparar a conferencia.
+                    O jeito mais rapido: importe o XML da nota e o app
+                    preenche produtos, quantidade, lote e validade sozinho.
                   </p>
                 </div>
                 <span className="hidden shrink-0 rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-600 sm:inline-block">
-                  Camera + chave
+                  Camera + chave + XML
                 </span>
               </div>
 
-              <div className="mt-5 grid grid-cols-2 gap-2 rounded-xl bg-slate-100 p-1">
+              <div className="mt-5 grid grid-cols-3 gap-2 rounded-xl bg-slate-100 p-1">
                 <button
-                  className={`rounded-lg px-3 py-3 text-sm font-bold transition ${
-                    scanMode === "photo"
+                  className={`rounded-lg px-2 py-3 text-xs font-bold transition sm:text-sm ${
+                    scanMode === "xml"
                       ? "bg-white text-[#09233f] shadow-sm"
                       : "text-slate-600 hover:text-slate-950"
                   }`}
-                  onClick={() => setScanMode("photo")}
+                  onClick={() => setScanMode("xml")}
                   type="button"
                 >
-                  Foto da nota
+                  Importar XML
                 </button>
                 <button
-                  className={`rounded-lg px-3 py-3 text-sm font-bold transition ${
+                  className={`rounded-lg px-2 py-3 text-xs font-bold transition sm:text-sm ${
                     scanMode === "key"
                       ? "bg-white text-[#09233f] shadow-sm"
                       : "text-slate-600 hover:text-slate-950"
@@ -855,9 +931,127 @@ export default function Home() {
                 >
                   Chave de acesso
                 </button>
+                <button
+                  className={`rounded-lg px-2 py-3 text-xs font-bold transition sm:text-sm ${
+                    scanMode === "photo"
+                      ? "bg-white text-[#09233f] shadow-sm"
+                      : "text-slate-600 hover:text-slate-950"
+                  }`}
+                  onClick={() => setScanMode("photo")}
+                  type="button"
+                >
+                  Foto da nota
+                </button>
               </div>
 
-              {scanMode === "photo" ? (
+              {scanMode === "xml" ? (
+                <div className="mt-5 min-h-72 rounded-xl border border-slate-200 bg-slate-50 p-4 sm:min-h-80 sm:p-5">
+                  <input
+                    accept=".xml,text/xml,application/xml"
+                    className="hidden"
+                    onChange={handleXmlFileChange}
+                    ref={xmlFileInputRef}
+                    type="file"
+                  />
+
+                  {!xmlPreview ? (
+                    <div className="flex flex-col items-center justify-center py-6 text-center">
+                      <div className="grid h-20 w-20 place-items-center rounded-xl bg-[#09233f] text-3xl font-bold text-white sm:h-24 sm:w-24 sm:text-4xl">
+                        <IconDoc className="h-10 w-10" />
+                      </div>
+                      <h3 className="mt-5 text-lg font-semibold">
+                        Importar arquivo XML da NF-e
+                      </h3>
+                      <p className="mt-2 max-w-sm text-sm leading-6 text-slate-600">
+                        Selecione o arquivo <span className="font-mono">.xml</span> da
+                        nota (o mesmo que o fornecedor manda por e-mail ou que
+                        voce baixa do portal dele). O app le tudo direto no
+                        navegador — o arquivo nao e enviado para nenhum
+                        servidor.
+                      </p>
+                      <button
+                        className="mt-5 flex items-center justify-center gap-2 rounded-xl bg-emerald-500 px-5 py-3.5 text-sm font-bold text-emerald-950 shadow-sm transition hover:bg-emerald-400 active:scale-[0.98] sm:w-auto sm:py-3"
+                        onClick={() => xmlFileInputRef.current?.click()}
+                        type="button"
+                      >
+                        <IconDoc className="h-4 w-4" />
+                        Escolher arquivo XML
+                      </button>
+
+                      {xmlImportError && (
+                        <p className="mt-4 flex items-start gap-2 rounded-lg bg-rose-50 p-3 text-left text-xs font-semibold leading-5 text-rose-800">
+                          <IconAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                          {xmlImportError}
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <div>
+                      <p className="flex items-center gap-2 text-sm font-bold text-emerald-800">
+                        <IconCheck className="h-4 w-4 shrink-0" />
+                        XML lido com sucesso
+                      </p>
+                      <div className="mt-3 grid gap-2.5 sm:grid-cols-2">
+                        <KeyInfo
+                          label="Numero da NF"
+                          value={xmlPreview.invoiceNumber || "Nao encontrado"}
+                        />
+                        <KeyInfo
+                          label="Fornecedor"
+                          value={xmlPreview.supplier || "Nao encontrado"}
+                        />
+                        <KeyInfo label="CNPJ emissor" value={xmlPreview.supplierCnpj || "Nao encontrado"} />
+                        <KeyInfo
+                          label="Itens encontrados"
+                          value={String(xmlPreview.items.length)}
+                        />
+                      </div>
+
+                      <div className="mt-4 max-h-48 overflow-y-auto rounded-lg border border-slate-200">
+                        <table className="w-full text-left text-xs">
+                          <thead>
+                            <tr className="bg-slate-100 text-slate-600">
+                              <Th>Produto</Th>
+                              <Th>Qtd.</Th>
+                              <Th>Lote</Th>
+                              <Th>Validade</Th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {xmlPreview.items.map((item, index) => (
+                              <tr className="border-t border-slate-100" key={index}>
+                                <Td>{item.product}</Td>
+                                <Td>
+                                  {item.expected} {item.unit}
+                                </Td>
+                                <Td>{item.batch || "-"}</Td>
+                                <Td>{item.validity || "-"}</Td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      <div className="mt-5 flex flex-col gap-3 sm:flex-row">
+                        <button
+                          className="flex items-center justify-center gap-2 rounded-xl bg-emerald-500 px-5 py-3.5 text-sm font-bold text-emerald-950 shadow-sm transition hover:bg-emerald-400 active:scale-[0.98] sm:py-3"
+                          onClick={confirmXmlImport}
+                          type="button"
+                        >
+                          Importar {xmlPreview.items.length} item(ns) para a conferencia
+                        </button>
+                        <button
+                          className="rounded-xl border border-slate-300 px-5 py-3 text-sm font-bold text-slate-700 transition hover:bg-slate-50"
+                          onClick={cancelXmlPreview}
+                          type="button"
+                        >
+                          Cancelar
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : scanMode === "photo" ? (
                 <div className="mt-5 flex min-h-72 flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 p-5 text-center sm:min-h-80">
                   <input
                     accept="image/*"
@@ -2299,6 +2493,118 @@ function isValidNfeKeyChecksum(key44Digits: string) {
   if (key44Digits.length !== 44) return false;
   const expectedDv = computeNfeCheckDigit(key44Digits.slice(0, 43));
   return expectedDv === Number(key44Digits[43]);
+}
+
+// --- Importacao real do XML da NF-e ---
+// O XML padrao da NF-e (schema oficial da SEFAZ) ja traz produto, unidade,
+// quantidade e, quando o fornecedor preenche rastreabilidade, lote e
+// validade (tag <rastro>). Tudo processado no proprio navegador — nenhum
+// arquivo sai da maquina do usuario.
+
+type ParsedNfeItem = {
+  code: string;
+  product: string;
+  unit: string;
+  expected: number;
+  batch: string;
+  validity: string;
+};
+
+type ParsedNfe = {
+  invoiceNumber: string;
+  supplier: string;
+  supplierCnpj: string;
+  entryDateTime: string;
+  accessKey: string;
+  items: ParsedNfeItem[];
+};
+
+// Busca por nome local da tag, ignorando o namespace da NF-e
+// (http://www.portalfiscal.inf.br/nfe), que atrapalha querySelector comum.
+function getElsByLocalName(root: Document | Element, name: string): Element[] {
+  return Array.from(root.getElementsByTagName("*")).filter(
+    (el) => el.localName === name,
+  );
+}
+
+function getTextByLocalName(root: Element, name: string): string {
+  return getElsByLocalName(root, name)[0]?.textContent?.trim() ?? "";
+}
+
+function formatNfNumberFromXml(rawNumber: string) {
+  const digits = rawNumber.replace(/\D/g, "");
+  if (!digits) return "";
+  const padded = digits.padStart(9, "0").slice(-9);
+  return `${padded.slice(0, 3)}.${padded.slice(3, 6)}.${padded.slice(6, 9)}`;
+}
+
+function formatXmlDateTime(iso: string) {
+  if (!iso) return "";
+  const parsed = new Date(iso);
+  if (Number.isNaN(parsed.getTime())) return iso;
+  return parsed.toLocaleString("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function parseNfeXml(xmlText: string): ParsedNfe {
+  const doc = new DOMParser().parseFromString(xmlText, "application/xml");
+  if (doc.getElementsByTagName("parsererror").length > 0) {
+    throw new Error("Arquivo XML invalido ou corrompido.");
+  }
+
+  const infNFe = getElsByLocalName(doc, "infNFe")[0];
+  if (!infNFe) {
+    throw new Error("Este arquivo nao parece ser um XML de NF-e.");
+  }
+
+  const ide = getElsByLocalName(infNFe, "ide")[0];
+  const emit = getElsByLocalName(infNFe, "emit")[0];
+
+  const nNF = ide ? getTextByLocalName(ide, "nNF") : "";
+  const dhEmi = ide
+    ? getTextByLocalName(ide, "dhEmi") || getTextByLocalName(ide, "dEmi")
+    : "";
+  const supplierName = emit ? getTextByLocalName(emit, "xNome") : "";
+  const supplierCnpj = emit ? getTextByLocalName(emit, "CNPJ") : "";
+
+  let accessKey = "";
+  const idAttr = infNFe.getAttribute("Id") ?? infNFe.getAttribute("id") ?? "";
+  const idMatch = idAttr.match(/(\d{44})/);
+  if (idMatch) accessKey = idMatch[1];
+
+  const items: ParsedNfeItem[] = getElsByLocalName(infNFe, "det")
+    .map((det) => {
+      const prod = getElsByLocalName(det, "prod")[0];
+      if (!prod) return null;
+
+      const quantityRaw = getTextByLocalName(prod, "qCom").replace(",", ".");
+      const quantity = Number(quantityRaw);
+      const rastro = getElsByLocalName(prod, "rastro")[0];
+
+      return {
+        code: getTextByLocalName(prod, "cProd"),
+        product: getTextByLocalName(prod, "xProd") || "Produto sem descricao",
+        unit: getTextByLocalName(prod, "uCom") || "UN",
+        expected: Number.isFinite(quantity) ? Math.round(quantity * 100) / 100 : 0,
+        batch: rastro ? getTextByLocalName(rastro, "nLote") : "",
+        validity: rastro ? getTextByLocalName(rastro, "dVal").slice(0, 10) : "",
+      };
+    })
+    .filter((item): item is ParsedNfeItem => item !== null && item.expected > 0);
+
+  return {
+    invoiceNumber: formatNfNumberFromXml(nNF),
+    supplier: supplierName,
+    supplierCnpj,
+    entryDateTime: formatXmlDateTime(dhEmi),
+    accessKey,
+    items,
+  };
 }
 
 function parseInvoiceKey(key: string) {
