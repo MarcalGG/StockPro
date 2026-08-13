@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 
 type ItemStatus = "Conferido" | "Divergente" | "Pendente";
 type ScanMode = "photo" | "key" | "xml";
@@ -72,6 +73,21 @@ const tabs: { id: TabId; label: string; icon: (props: IconProps) => React.ReactE
 
 const STORAGE_KEY = "stockscan-pro:recebimento-atual";
 
+type FiscalLookupResult = {
+  status:
+    | "LOCALIZADO"
+    | "NAO_SINCRONIZADO"
+    | "JA_VINCULADO"
+    | "CHAVE_INVALIDA"
+    | "INDISPONIVEL";
+  tipo?: "NFE" | "CTE";
+  documentId?: string;
+  numero?: string | null;
+  serie?: string | null;
+  emitenteNome?: string | null;
+  emitenteCnpj?: string | null;
+};
+
 export default function Home() {
   const [activeTab, setActiveTab] = useState<TabId>("Recebimento");
   const [scanMode, setScanMode] = useState<ScanMode>("photo");
@@ -88,6 +104,14 @@ export default function Home() {
   const [supplier, setSupplier] = useState("");
   const [responsible, setResponsible] = useState("");
   const [entryDateTime, setEntryDateTime] = useState("");
+  // Id local (nao e um id de banco) usado so para vincular um documento
+  // fiscal sincronizado a "este" recebimento no navegador. Gerado uma vez e
+  // mantido no localStorage junto com o resto do recebimento.
+  const [recebimentoId] = useState(() =>
+    typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
+  );
+  const [fiscalLookup, setFiscalLookup] = useState<FiscalLookupResult | null>(null);
+  const [fiscalLookupLoading, setFiscalLookupLoading] = useState(false);
   const [inventoryRows, setInventoryRows] = useState<InventoryRow[]>(initialInventoryRows);
   const [newItem, setNewItem] = useState(newItemDefault);
   const [whatsappMessage, setWhatsappMessage] = useState("");
@@ -217,6 +241,58 @@ export default function Home() {
     entryDateTime,
     inventoryRows,
   ]);
+
+  // Atualizacao 2: quando a chave fica valida, pergunta ao backend (se
+  // configurado) se ja existe um documento fiscal sincronizado com essa
+  // chave. Nunca bloqueia o preenchimento manual — qualquer falha (sem
+  // sessao admin configurada, sem rede, servidor fora) so deixa o
+  // resultado como "indisponivel" e a pessoa segue preenchendo normalmente.
+  useEffect(() => {
+    // Nao reseta fiscalLookup sincronamente aqui: a renderizacao ja so
+    // mostra o banner quando isInvoiceKeyValid e verdadeiro, entao um
+    // resultado antigo simplesmente fica sem uso ate a proxima chave valida.
+    if (!isInvoiceKeyValid) return;
+
+    let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- consulta dispara quando a chave fica valida; nao ha como mover para fora do efeito
+    setFiscalLookupLoading(true);
+
+    fetch(`/api/fiscal/lookup/${cleanInvoiceKey}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled) setFiscalLookup(data);
+      })
+      .catch(() => {
+        if (!cancelled) setFiscalLookup({ status: "INDISPONIVEL" });
+      })
+      .finally(() => {
+        if (!cancelled) setFiscalLookupLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isInvoiceKeyValid, cleanInvoiceKey]);
+
+  async function vincularDocumentoFiscal() {
+    if (!fiscalLookup?.documentId) return;
+    try {
+      const res = await fetch(`/api/fiscal/documents/${fiscalLookup.documentId}/link`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ recebimentoId }),
+      });
+      if (res.ok) {
+        if (fiscalLookup.emitenteNome) setSupplier((current) => current || fiscalLookup.emitenteNome!);
+        if (fiscalLookup.numero) {
+          setInvoiceNumber((current) => current || fiscalLookup.numero!);
+        }
+        setFiscalLookup((current) => (current ? { ...current, status: "JA_VINCULADO" } : current));
+      }
+    } catch {
+      // sem conexao com o backend: a pessoa continua preenchendo manualmente
+    }
+  }
 
   const barcodeScannerSupported =
     typeof window !== "undefined" && "BarcodeDetector" in window;
@@ -934,13 +1010,21 @@ export default function Home() {
                 />
               </div>
 
-              <button
-                className="mt-4 text-xs font-bold text-rose-200 underline decoration-dotted underline-offset-2 hover:text-rose-100"
-                onClick={clearReceiving}
-                type="button"
-              >
-                Limpar recebimento atual
-              </button>
+              <div className="mt-4 flex flex-wrap items-center gap-4">
+                <button
+                  className="text-xs font-bold text-rose-200 underline decoration-dotted underline-offset-2 hover:text-rose-100"
+                  onClick={clearReceiving}
+                  type="button"
+                >
+                  Limpar recebimento atual
+                </button>
+                <Link
+                  className="text-xs font-bold text-cyan-200 underline decoration-dotted underline-offset-2 hover:text-cyan-100"
+                  href="/configuracoes"
+                >
+                  Configuracoes &gt; Documentos Fiscais
+                </Link>
+              </div>
             </section>
           </div>
         </header>
@@ -1288,6 +1372,14 @@ export default function Home() {
                       Chave valida com 44 digitos. Confira os dados abaixo antes
                       de importar.
                     </p>
+                  )}
+
+                  {isInvoiceKeyValid && (fiscalLookupLoading || fiscalLookup) && (
+                    <FiscalLookupBanner
+                      loading={fiscalLookupLoading}
+                      onVincular={vincularDocumentoFiscal}
+                      result={fiscalLookup}
+                    />
                   )}
 
                   <div className="mt-4 grid grid-cols-2 gap-2.5 sm:grid-cols-3">
@@ -2460,6 +2552,81 @@ function KeyInfo({ label, value }: { label: string; value: string }) {
       <p className="mt-1 truncate font-semibold text-slate-900">{value}</p>
     </div>
   );
+}
+
+type FiscalLookupBannerResult = {
+  status: string;
+  tipo?: string;
+  documentId?: string;
+  numero?: string | null;
+  serie?: string | null;
+  emitenteNome?: string | null;
+  emitenteCnpj?: string | null;
+} | null;
+
+// Mostra o status da consulta ao documento fiscal sincronizado (Atualizacao
+// 2 — certificado A1). Se o backend fiscal nao estiver configurado, o
+// resultado vem como "INDISPONIVEL" e nada e mostrado (a conferencia
+// manual continua funcionando normalmente).
+function FiscalLookupBanner({
+  loading,
+  onVincular,
+  result,
+}: {
+  loading: boolean;
+  onVincular: () => void;
+  result: FiscalLookupBannerResult;
+}) {
+  if (loading) {
+    return (
+      <p className="mt-3 rounded-lg bg-slate-50 p-3 text-xs font-semibold leading-5 text-slate-600">
+        Consultando documento fiscal sincronizado...
+      </p>
+    );
+  }
+
+  if (!result || result.status === "INDISPONIVEL") return null;
+
+  if (result.status === "LOCALIZADO") {
+    return (
+      <div className="mt-3 rounded-lg bg-emerald-50 p-3 text-xs leading-5 text-emerald-900">
+        <p className="font-bold">
+          Documento localizado ({result.tipo === "CTE" ? "CT-e" : "NF-e"})
+        </p>
+        <p className="mt-1">
+          {result.emitenteNome || "Emitente nao identificado"}
+          {result.numero ? ` — numero ${result.numero}` : ""}
+          {result.serie ? `, serie ${result.serie}` : ""}
+        </p>
+        <button
+          className="mt-2 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white transition hover:bg-emerald-700"
+          onClick={onVincular}
+          type="button"
+        >
+          Vincular a este recebimento
+        </button>
+      </div>
+    );
+  }
+
+  if (result.status === "JA_VINCULADO") {
+    return (
+      <p className="mt-3 rounded-lg bg-cyan-50 p-3 text-xs font-semibold leading-5 text-cyan-900">
+        Documento ja vinculado a este (ou outro) recebimento.
+      </p>
+    );
+  }
+
+  if (result.status === "NAO_SINCRONIZADO") {
+    return (
+      <p className="mt-3 rounded-lg bg-amber-50 p-3 text-xs font-semibold leading-5 text-amber-900">
+        Documento ainda nao sincronizado. Sincronize em Configuracoes &gt;
+        Documentos Fiscais, ou continue preenchendo manualmente.
+      </p>
+    );
+  }
+
+  return null;
 }
 
 function Pill({

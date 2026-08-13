@@ -21,11 +21,17 @@ O app abre em branco (sem nota, sem itens, sem contagem de estoque) — os dados
 - Tela de inventario com cadastro manual de contagens (endereco, produto, quantidade, lotes, status).
 - Relatorio de divergencia completo: dados da nota, responsavel, todos os itens (com lote/validade/avaria) e resumo para aprovacao. Tabelas viram cards no celular, sem cortar conteudo.
 - Exportacao do relatorio: "Gerar PDF" abre a impressao do navegador (salvar como PDF) e "Exportar Excel" baixa um `.csv` com todos os itens.
+- **Configuracoes > Documentos Fiscais** (login administrativo): configure o certificado digital A1 da empresa e o app sincroniza automaticamente NF-e e CT-e destinadas ao CNPJ, direto da SEFAZ. Ver secao dedicada abaixo.
 
 ## Rodar localmente
 
 ```bash
 npm install
+cp .env.example .env.local
+# edite .env.local: gere CERT_ENCRYPTION_KEY e SESSION_SECRET (comando no
+# proprio arquivo), e defina ADMIN_EMAIL / ADMIN_PASSWORD para o primeiro login
+npm run db:push
+npm run db:seed
 npm run dev
 ```
 
@@ -35,6 +41,8 @@ Abra:
 http://localhost:3000
 ```
 
+Login administrativo (Configuracoes > Documentos Fiscais): `http://localhost:3000/login`, com o e-mail/senha que voce definiu em `ADMIN_EMAIL`/`ADMIN_PASSWORD`.
+
 ## Build
 
 ```bash
@@ -43,22 +51,34 @@ npm run build
 
 ## Publicar na Vercel
 
+O app agora tem duas partes: o front-end (sempre funcionou 100% no navegador) e o back-end fiscal novo (certificado A1, login, banco de dados). O front-end continua funcionando normalmente mesmo se voce nao configurar a parte fiscal ainda.
+
 1. Suba este projeto para um repositorio GitHub.
-2. Entre na Vercel.
-3. Clique em **Add New > Project**.
-4. Importe o repositorio `StockPro`.
-5. Framework: **Next.js**.
-6. Build command: `npm run build`.
-7. Output directory: deixe em branco.
-8. Clique em **Deploy**.
+2. **Crie um banco Postgres** (Vercel Postgres ou [Neon](https://neon.tech), ambos tem plano gratuito). SQLite (usado em desenvolvimento local) nao funciona na Vercel — funcoes serverless nao tem disco persistente.
+3. Em `prisma/schema.prisma`, troque `provider = "sqlite"` por `provider = "postgresql"`.
+4. Em `lib/db.ts`, troque o adapter SQLite pelo adapter Postgres (`@prisma/adapter-pg`) — o proprio arquivo tem um comentario com o codigo exato para essa troca.
+5. `npm install @prisma/adapter-pg pg`.
+6. Entre na Vercel, **Add New > Project**, importe o repositorio.
+7. Configure as variaveis de ambiente do projeto na Vercel: `DATABASE_URL` (connection string do Postgres), `CERT_ENCRYPTION_KEY`, `SESSION_SECRET` (gere as duas com o comando no `.env.example`). `ADMIN_EMAIL`/`ADMIN_PASSWORD` sao opcionais aqui — so servem para o script de seed.
+8. Framework: **Next.js**. Build command: `npm run build`. Output directory: deixe em branco. Clique em **Deploy**.
+9. Depois do primeiro deploy, rode o seed **contra o banco de producao** (uma vez so, da sua maquina): `DATABASE_URL="<a mesma da Vercel>" ADMIN_EMAIL=... ADMIN_PASSWORD=... npm run db:seed`. Isso cria a empresa e o primeiro usuario administrador.
+10. Acesse `https://seu-site.vercel.app/login` com esse e-mail/senha para configurar o certificado.
 
-## Proximas fases
+## Certificado Digital A1 e sincronizacao de NF-e/CT-e
 
-- OCR real para ler produto/quantidade da foto da nota (hoje a foto e so evidencia; use a importacao de XML quando tiver o arquivo).
-- Consulta automatica ao SEFAZ so com a chave de acesso, sem precisar do arquivo XML — exige certificado digital da empresa (e-CNPJ) e um servico pago de consulta (ex.: Focus NFe, NFe.io); e uma integracao de backend, fora do escopo de um app 100% client-side como este.
-- Banco de dados para historico de recebimentos.
-- Login/autenticacao de usuarios.
-- Exportacao em `.xlsx` nativo (hoje o export usa `.csv`, que o Excel abre normalmente) e em PDF com layout proprio (hoje usa a impressao do navegador).
+Como funciona, tecnicamente:
+
+- O certificado (.pfx/.p12) e enviado uma unica vez pela tela **Configuracoes > Documentos Fiscais**. O backend le o certificado, extrai o certificado e a chave privada, **criptografa os dois com AES-256-GCM** (chave em `CERT_ENCRYPTION_KEY`) e grava no banco. A senha original do certificado e usada so nesse momento, em memoria, e nunca e salva em lugar nenhum — nem no banco, nem em log, nem na resposta da API.
+- A consulta usa o servico oficial de **Distribuicao de DF-e** da SEFAZ (`NFeDistribuicaoDFe` para NF-e, `CTeDistribuicaoDFe` para CT-e), autenticando com o certificado via TLS mutuo — o mesmo mecanismo que ERPs comerciais usam. Nao ha scraping nem consulta publica.
+- Cada sincronizacao usa o `ultNSU` (numero sequencial) da ultima busca, para nao reprocessar os mesmos documentos, e tem um intervalo minimo entre buscas para nao sobrecarregar o servico da SEFAZ.
+- Documentos sao gravados sem duplicar (chave de acesso e unica por empresa).
+- Todas as rotas fiscais exigem login administrativo (`lib/auth.ts`, sessao em cookie assinado). Sem sessao, a tela de Recebimento continua funcionando normalmente — a consulta de chave so deixa de mostrar o vinculo automatico.
+- Esta implementacao e de **uma empresa por instalacao** (login simples de administrador, sem multiempresa) — o isolamento por CNPJ e garantido porque so existe uma empresa no banco.
+
+Limitacoes reais (nao testadas contra o servico real da SEFAZ, por nao haver como validar isso neste ambiente):
+
+- Os endpoints/parametros da SEFAZ foram implementados a partir de documentacao publica e podem precisar de ajuste fino contra o manual oficial vigente antes de operar em producao.
+- O teste de conexao e a sincronizacao real dependem de um certificado A1 valido e de rede liberada ate a SEFAZ — teste isso na sua maquina/servidor antes de confiar na integracao.
 
 ## Sobre a leitura por camera
 

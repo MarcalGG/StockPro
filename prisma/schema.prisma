@@ -1,0 +1,168 @@
+// Banco de dados do StockScan Pro — Configuracoes Fiscais (certificado A1, NF-e/CT-e).
+//
+// Provider atual: SQLite. Funciona sozinho em "npm run dev" / "npm run build"
+// local, sem precisar de conta em nada — bom para desenvolvimento e para os
+// testes automatizados deste projeto.
+//
+// IMPORTANTE PARA PRODUCAO (Vercel): funcoes serverless da Vercel nao tem
+// disco persistente, entao um arquivo SQLite local NAO sobrevive entre
+// requisicoes em producao. Antes de publicar de verdade, troque para
+// Postgres (ex.: Vercel Postgres ou Neon, ambos tem plano gratuito):
+//
+//   1. troque `provider = "sqlite"` para `provider = "postgresql"` abaixo;
+//   2. defina DATABASE_URL nas variaveis de ambiente da Vercel com a
+//      connection string do Postgres;
+//   3. rode `npx prisma migrate deploy` (ou `npx prisma db push`) apontando
+//      para o banco de producao.
+//
+// Nenhum dado de certificado, senha ou XML fica no codigo-fonte — tudo vem
+// de DATABASE_URL e CERT_ENCRYPTION_KEY (variaveis de ambiente).
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../lib/generated/prisma"
+}
+
+// A partir do Prisma ORM 7, a connection string nao fica mais aqui — ela
+// vive em prisma.config.ts (para o CLI/migrations) e e passada direto para
+// o PrismaClient via driver adapter (ver lib/db.ts). Aqui so declaramos o
+// tipo de banco.
+datasource db {
+  provider = "sqlite"
+}
+
+enum Ambiente {
+  PRODUCAO
+  HOMOLOGACAO
+}
+
+enum CertificateStatus {
+  NAO_CONFIGURADO
+  CONFIGURADO
+  CONEXAO_VALIDADA
+  PROXIMO_DO_VENCIMENTO
+  VENCIDO
+  ERRO_AUTENTICACAO
+  ERRO_CONEXAO
+}
+
+enum DocumentoTipo {
+  NFE
+  CTE
+}
+
+enum SyncStatus {
+  EM_ANDAMENTO
+  CONCLUIDA
+  ERRO
+}
+
+model Company {
+  id          String   @id @default(cuid())
+  razaoSocial String
+  cnpj        String   @unique // somente digitos, 14 caracteres
+  // Codigo IBGE da UF (ex.: 35 = SP), exigido pela SEFAZ como "cUFAutor" na
+  // consulta de distribuicao de DF-e. Nao estava na lista original de
+  // campos do card de certificado, mas e obrigatorio tecnicamente — por
+  // isso foi adicionado aqui.
+  ufCodigo    Int?
+  ambiente    Ambiente @default(HOMOLOGACAO)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  adminUsers  AdminUser[]
+  certificate Certificate?
+  documents   FiscalDocument[]
+  syncRuns    SyncRun[]
+  auditLogs   AuditLog[]
+}
+
+model AdminUser {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  companyId    String
+  company      Company  @relation(fields: [companyId], references: [id])
+  createdAt    DateTime @default(now())
+}
+
+// Guarda o certificado A1 SEMPRE criptografado (AES-256-GCM). A senha
+// original do .pfx/.p12 e usada uma unica vez, no upload, para extrair o
+// certificado e a chave privada em PEM; depois disso a senha original e
+// descartada — nunca e persistida em lugar nenhum, nem aqui.
+model Certificate {
+  id        String            @id @default(cuid())
+  companyId String            @unique
+  company   Company           @relation(fields: [companyId], references: [id])
+
+  status CertificateStatus @default(NAO_CONFIGURADO)
+
+  // Certificado (PEM) e chave privada (PEM) criptografados com
+  // AES-256-GCM (chave em CERT_ENCRYPTION_KEY). Cada campo guarda o
+  // "iv:authTag:ciphertext" em base64, tudo em uma unica string.
+  encryptedCertPem String
+  encryptedKeyPem  String
+
+  // Metadados extraidos do certificado no momento do upload (nao sensiveis):
+  subjectCn   String? // nome/razao social identificado no certificado
+  certCnpj    String? // CNPJ extraido do certificado (para conferir com o CNPJ da empresa)
+  validFrom   DateTime?
+  validTo     DateTime?
+
+  uploadedByEmail String
+  uploadedAt      DateTime @default(now())
+
+  lastTestedAt   DateTime?
+  lastTestResult String? // "sucesso" | "erro"
+  lastTestMessage String? // mensagem amigavel (nunca inclui senha/certificado)
+}
+
+model FiscalDocument {
+  id            String        @id @default(cuid())
+  companyId     String
+  company       Company       @relation(fields: [companyId], references: [id])
+
+  tipo          DocumentoTipo
+  chaveAcesso   String // 44 digitos
+  numero        String?
+  serie         String?
+  emissao       DateTime?
+  emitenteNome  String?
+  emitenteCnpj  String?
+  valorTotal    Float?
+  statusFiscal  String?
+  xml           String? // XML completo, quando disponibilizado pela SEFAZ (nao criptografado; e um documento fiscal publico para o proprio CNPJ, nao um segredo de acesso)
+  origem        String        @default("SEFAZ via certificado A1")
+  importadoEm   DateTime      @default(now())
+
+  vinculadoRecebimentoId String? // id livre do recebimento no app (o recebimento em si vive no navegador do usuario, nao no banco)
+
+  @@unique([companyId, chaveAcesso])
+  @@index([companyId, tipo])
+}
+
+model SyncRun {
+  id        String     @id @default(cuid())
+  companyId String
+  company   Company    @relation(fields: [companyId], references: [id])
+
+  status          SyncStatus @default(EM_ANDAMENTO)
+  startedAt       DateTime   @default(now())
+  finishedAt      DateTime?
+  novosDocumentos Int        @default(0)
+  novasNfe        Int        @default(0)
+  novasCte        Int        @default(0)
+  ultNsu          String?
+  errorMessage    String?
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  companyId  String?
+  company    Company? @relation(fields: [companyId], references: [id])
+
+  actorEmail String
+  action     String // ex.: "certificado.configurado", "certificado.teste_conexao", "sincronizacao.executada"
+  detail     String? // JSON com detalhes NAO sensiveis (nunca senha/certificado)
+  createdAt  DateTime @default(now())
+}
