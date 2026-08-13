@@ -9,6 +9,7 @@ type TabId = "Recebimento" | "Conferencia" | "Inventario" | "Relatorio";
 type InvoiceItem = {
   id: number;
   code: string;
+  barcode: string;
   product: string;
   unit: string;
   expected: number;
@@ -91,17 +92,25 @@ export default function Home() {
   const [newItem, setNewItem] = useState(newItemDefault);
   const [whatsappMessage, setWhatsappMessage] = useState("");
   const [copyFeedback, setCopyFeedback] = useState("");
-  const [scannerTarget, setScannerTarget] = useState<"invoiceKey" | "newItemCode" | null>(null);
+  const [scannerTarget, setScannerTarget] = useState<
+    "invoiceKey" | "newItemCode" | "conferenceLoop" | null
+  >(null);
   const [cameraError, setCameraError] = useState("");
   const [notePhotoUrl, setNotePhotoUrl] = useState<string | null>(null);
   const [xmlImportError, setXmlImportError] = useState("");
   const [xmlPreview, setXmlPreview] = useState<ParsedNfe | null>(null);
+  const [scanFeedback, setScanFeedback] = useState<{ text: string; tone: "success" | "error" } | null>(
+    null,
+  );
+  const [scanLog, setScanLog] = useState<{ text: string; tone: "success" | "error" }[]>([]);
   const hasHydrated = useRef(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const scanFrameRef = useRef<number | null>(null);
   const notePhotoInputRef = useRef<HTMLInputElement | null>(null);
   const xmlFileInputRef = useRef<HTMLInputElement | null>(null);
+  const lastScanRef = useRef<{ code: string; at: number } | null>(null);
+  const scanFeedbackTimeoutRef = useRef<number | null>(null);
 
   const cleanInvoiceKey = invoiceKey.replace(/\D/g, "").slice(0, 44);
   const isInvoiceKeyComplete = cleanInvoiceKey.length === 44;
@@ -258,6 +267,22 @@ export default function Home() {
                 setScannerTarget(null);
                 return;
               }
+              if (scannerTarget === "conferenceLoop" && raw.length > 0) {
+                const now = Date.now();
+                const last = lastScanRef.current;
+                const isRepeat = last !== null && last.code === raw && now - last.at < 1200;
+                if (!isRepeat) {
+                  lastScanRef.current = { code: raw, at: now };
+                  const result = incrementReceivedByCode(raw);
+                  pushScanFeedback(
+                    result.matched
+                      ? `+1 ${result.productName}`
+                      : `Codigo ${raw} nao encontrado na nota`,
+                    result.matched ? "success" : "error",
+                  );
+                }
+                // continua escaneando: nao fecha a camera apos um match
+              }
             }
           } catch {
             // frame nao decodificavel ainda, tenta o proximo
@@ -311,6 +336,58 @@ export default function Home() {
 
   function closeScanner() {
     setScannerTarget(null);
+    setScanFeedback(null);
+  }
+
+  // Fase 2 (extra): escaneia o codigo de barras do produto durante a
+  // conferencia fisica e soma 1 na quantidade recebida, sem digitar nada.
+  function openConferenceScanner() {
+    if (isFinalized) return;
+    if (!barcodeScannerSupported) {
+      setCameraError(
+        "Este navegador nao suporta leitura de codigo de barras pela camera. Digite as quantidades manualmente.",
+      );
+      return;
+    }
+    if (items.length === 0) {
+      setCameraError("Adicione os itens da nota antes de escanear.");
+      return;
+    }
+    setCameraError("");
+    setScanLog([]);
+    setScanFeedback(null);
+    lastScanRef.current = null;
+    setScannerTarget("conferenceLoop");
+  }
+
+  function pushScanFeedback(text: string, tone: "success" | "error") {
+    setScanFeedback({ text, tone });
+    setScanLog((current) => [{ text, tone }, ...current].slice(0, 6));
+    if (scanFeedbackTimeoutRef.current) window.clearTimeout(scanFeedbackTimeoutRef.current);
+    scanFeedbackTimeoutRef.current = window.setTimeout(() => setScanFeedback(null), 1800);
+  }
+
+  function incrementReceivedByCode(rawCode: string): { matched: boolean; productName: string } {
+    let matchedName = "";
+    setItems((current) => {
+      const idx = current.findIndex(
+        (item) => (item.barcode && item.barcode === rawCode) || item.code === rawCode,
+      );
+      if (idx === -1) return current;
+      matchedName = current[idx].product;
+      return current.map((item, i) => {
+        if (i !== idx) return item;
+        const nextReceived = item.received + 1;
+        const next = {
+          ...item,
+          received: nextReceived,
+          shortageFlag: nextReceived >= item.expected ? false : item.shortageFlag,
+          surplusFlag: nextReceived <= item.expected ? false : item.surplusFlag,
+        };
+        return { ...next, status: computeItemStatus(next) };
+      });
+    });
+    return { matched: matchedName !== "", productName: matchedName };
   }
 
   function handleNotePhotoChange(event: React.ChangeEvent<HTMLInputElement>) {
@@ -364,6 +441,7 @@ export default function Home() {
     const importedItems: InvoiceItem[] = xmlPreview.items.map((item, index) => ({
       id: nextItemId + index,
       code: item.code || String(nextItemId + index),
+      barcode: item.barcode,
       product: item.product,
       unit: item.unit,
       expected: item.expected,
@@ -507,6 +585,7 @@ export default function Home() {
       {
         id: nextItemId,
         code: code || String(nextItemId),
+        barcode: code,
         product,
         unit: newItem.unit.trim() || "UN",
         expected,
@@ -1308,6 +1387,24 @@ export default function Home() {
                 </div>
               </div>
 
+              {!isFinalized && items.length > 0 && (
+                <button
+                  className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-[#09233f] px-5 py-3.5 text-sm font-bold text-white shadow-sm transition hover:bg-[#12385f] active:scale-[0.98] sm:py-3"
+                  onClick={openConferenceScanner}
+                  type="button"
+                >
+                  <IconCamera className="h-4 w-4" />
+                  Escanear produtos (camera) — soma 1 a cada leitura
+                </button>
+              )}
+
+              {cameraError && scannerTarget === null && (
+                <p className="mt-2 flex items-start gap-2 text-xs font-semibold leading-5 text-amber-700">
+                  <IconAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  {cameraError}
+                </p>
+              )}
+
               {isFinalized && (
                 <p className="mt-4 flex items-start gap-2 rounded-lg bg-cyan-50 p-3 text-xs font-semibold leading-5 text-cyan-900">
                   <IconCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -1385,12 +1482,6 @@ export default function Home() {
                       Adicionar
                     </button>
                   </div>
-                  {cameraError && scannerTarget === null && (
-                    <p className="mt-2 flex items-start gap-2 text-xs font-semibold leading-5 text-amber-700">
-                      <IconAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                      {cameraError}
-                    </p>
-                  )}
                 </div>
               )}
 
@@ -2234,23 +2325,57 @@ export default function Home() {
 
       {scannerTarget && (
         <div className="no-print fixed inset-0 z-50 flex flex-col items-center justify-center gap-4 bg-black/90 p-4">
-          <video
-            className="max-h-[65vh] w-full max-w-md rounded-2xl bg-black"
-            muted
-            playsInline
-            ref={videoRef}
-          />
+          <div className="relative w-full max-w-md">
+            <video
+              className="max-h-[55vh] w-full rounded-2xl bg-black"
+              muted
+              playsInline
+              ref={videoRef}
+            />
+            {scannerTarget === "conferenceLoop" && scanFeedback && (
+              <div
+                className={`absolute inset-x-3 top-3 rounded-xl px-4 py-2.5 text-center text-sm font-bold shadow-lg ${
+                  scanFeedback.tone === "success"
+                    ? "bg-emerald-500 text-emerald-950"
+                    : "bg-rose-500 text-white"
+                }`}
+              >
+                {scanFeedback.text}
+              </div>
+            )}
+          </div>
+
           <p className="max-w-xs text-center text-sm text-white">
             {scannerTarget === "invoiceKey"
               ? "Aponte para o codigo de barras ou QR da chave de acesso."
-              : "Aponte para o codigo de barras do produto."}
+              : scannerTarget === "conferenceLoop"
+                ? "Aponte para o codigo de barras de cada produto. A quantidade recebida soma 1 a cada leitura — pode continuar escaneando."
+                : "Aponte para o codigo de barras do produto."}
           </p>
+
+          {scannerTarget === "conferenceLoop" && scanLog.length > 0 && (
+            <div className="w-full max-w-md rounded-xl bg-white/10 p-3">
+              <ul className="space-y-1.5">
+                {scanLog.map((entry, index) => (
+                  <li
+                    className={`text-xs font-semibold ${
+                      entry.tone === "success" ? "text-emerald-300" : "text-rose-300"
+                    }`}
+                    key={index}
+                  >
+                    {entry.text}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           <button
             className="rounded-xl bg-white px-6 py-3 text-sm font-bold text-slate-900 transition active:scale-[0.98]"
             onClick={closeScanner}
             type="button"
           >
-            Cancelar
+            {scannerTarget === "conferenceLoop" ? "Concluir" : "Cancelar"}
           </button>
         </div>
       )}
@@ -2503,6 +2628,7 @@ function isValidNfeKeyChecksum(key44Digits: string) {
 
 type ParsedNfeItem = {
   code: string;
+  barcode: string;
   product: string;
   unit: string;
   expected: number;
@@ -2586,8 +2712,11 @@ function parseNfeXml(xmlText: string): ParsedNfe {
       const quantity = Number(quantityRaw);
       const rastro = getElsByLocalName(prod, "rastro")[0];
 
+      const cEAN = getTextByLocalName(prod, "cEAN");
+
       return {
         code: getTextByLocalName(prod, "cProd"),
+        barcode: cEAN && cEAN.toUpperCase() !== "SEM GTIN" ? cEAN : "",
         product: getTextByLocalName(prod, "xProd") || "Produto sem descricao",
         unit: getTextByLocalName(prod, "uCom") || "UN",
         expected: Number.isFinite(quantity) ? Math.round(quantity * 100) / 100 : 0,
