@@ -8,9 +8,9 @@ O app abre em branco (sem nota, sem itens, sem contagem de estoque) — os dados
 
 - Navegacao tipo app (barra inferior no celular, abas com icones no desktop), com interface responsiva.
 - Dados da nota (numero, fornecedor, responsavel, data/hora de entrada) editaveis direto no card do cabecalho.
-- Fluxo de foto da nota fiscal em papel (simulado).
-- **Chave de acesso da NF-e sem esforco**: aceita a chave digitada ou colada com pontos, tracos ou espacos — o app limpa tudo automaticamente, formata em blocos de 4 digitos, valida os 44 numeros e extrai UF, emissao, CNPJ do emissor, modelo, serie e numero da nota. O botao "Usar chave e importar itens" preenche o numero da NF sozinho e ja leva para a conferencia.
-- Cadastro manual de itens da nota (codigo, produto, unidade, quantidade) enquanto a importacao automatica nao esta conectada, com opcao de remover.
+- **Foto da nota pela camera de verdade**: o botao "Tirar foto da nota" abre a camera real do aparelho (via `capture="environment"`) e guarda a foto como evidencia do recebimento.
+- **Chave de acesso da NF-e sem esforco**: um botao "Escanear codigo de barras / QR com a camera" le a chave direto da DANFE usando a camera (API nativa `BarcodeDetector` do navegador, sem servico externo) — funciona em Chrome/Edge no Android e desktop; onde nao ha suporte, o app avisa e cai automaticamente para colar/digitar. Aceita a chave com pontos, tracos ou espacos, limpa tudo, formata em blocos de 4 digitos e valida os 44 numeros **com o digito verificador real da NF-e (modulo 11)** — uma chave aleatoria com 44 digitos, mas com o digito verificador errado, e rejeitada com "chave incorreta". Extrai UF, emissao, CNPJ do emissor, modelo, serie e numero da nota. O botao "Usar chave e importar itens" preenche o numero da NF sozinho e ja leva para a conferencia.
+- Cadastro manual de itens da nota (codigo, produto, unidade, quantidade) enquanto a importacao automatica do XML nao esta conectada, com opcao de remover. O campo de codigo tambem tem um botao de camera para ler o codigo de barras do produto sem digitar.
 - **Conferencia com botoes rapidos por produto** (sem digitar numeros): Recebido tudo, Faltou, Sobrou, Avaria, Validade curta e Lote nao informado. O status e os destaques visuais (lote/validade) mudam sozinhos.
 - **Resumo automatico de divergencias**: itens conferidos, pendentes, divergencias, produtos com falta, com sobra, com avaria, sem lote e com validade curta — tudo calculado em tempo real.
 - **Mensagem pronta para WhatsApp**: gera um resumo com nota, fornecedor, responsavel e a lista de divergencias, com botao "Copiar mensagem" e link "Abrir no WhatsApp".
@@ -52,9 +52,12 @@ npm run build
 
 ## Proximas fases
 
-- OCR real para ler nota fiscal em papel.
-- Leitura de codigo de barras pela camera.
-- Consulta/importacao real do XML da NF-e (a estrutura de leitura da chave ja esta pronta).
+- OCR real para ler produto/quantidade da foto da nota (hoje a foto e so evidencia; os itens ainda sao cadastrados na conferencia).
+- Consulta/importacao real do XML da NF-e para trazer os itens automaticamente pela chave (a leitura e validacao da chave ja estao prontas).
 - Banco de dados para historico de recebimentos.
 - Login/autenticacao de usuarios.
 - Exportacao em `.xlsx` nativo (hoje o export usa `.csv`, que o Excel abre normalmente) e em PDF com layout proprio (hoje usa a impressao do navegador).
+
+## Sobre a leitura por camera
+
+O scanner de codigo de barras/QR usa a API nativa `BarcodeDetector` do navegador — funciona sem instalar nada, mas hoje so tem suporte real em Chrome/Edge (Android e desktop). Em navegadores sem suporte (Safari/iOS, por exemplo) o app mostra um aviso e o usuario cola ou digita a chave normalmente. A camera so e acessada quando o usuario clica em escanear, e pede a permissao do navegador na hora.

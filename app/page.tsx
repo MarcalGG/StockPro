@@ -91,10 +91,19 @@ export default function Home() {
   const [newItem, setNewItem] = useState(newItemDefault);
   const [whatsappMessage, setWhatsappMessage] = useState("");
   const [copyFeedback, setCopyFeedback] = useState("");
+  const [scannerTarget, setScannerTarget] = useState<"invoiceKey" | "newItemCode" | null>(null);
+  const [cameraError, setCameraError] = useState("");
+  const [notePhotoUrl, setNotePhotoUrl] = useState<string | null>(null);
   const hasHydrated = useRef(false);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
+  const scanFrameRef = useRef<number | null>(null);
+  const notePhotoInputRef = useRef<HTMLInputElement | null>(null);
 
   const cleanInvoiceKey = invoiceKey.replace(/\D/g, "").slice(0, 44);
-  const isInvoiceKeyValid = cleanInvoiceKey.length === 44;
+  const isInvoiceKeyComplete = cleanInvoiceKey.length === 44;
+  const isInvoiceKeyChecksumValid = isInvoiceKeyComplete && isValidNfeKeyChecksum(cleanInvoiceKey);
+  const isInvoiceKeyValid = isInvoiceKeyComplete && isInvoiceKeyChecksumValid;
   const invoiceKeyParts = parseInvoiceKey(cleanInvoiceKey);
   const invoiceKeyTouched = cleanInvoiceKey.length > 0;
   const isFinalized = finalizedAt !== null;
@@ -197,6 +206,120 @@ export default function Home() {
     inventoryRows,
   ]);
 
+  const barcodeScannerSupported =
+    typeof window !== "undefined" && "BarcodeDetector" in window;
+
+  // Le codigo de barras/QR pela camera de verdade (API nativa do navegador,
+  // sem biblioteca externa). Funciona em Chrome/Edge no Android e desktop;
+  // navegadores sem suporte caem no aviso de fallback (colar/digitar).
+  useEffect(() => {
+    if (!scannerTarget) return;
+
+    let cancelled = false;
+
+    async function start() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment" },
+        });
+        if (cancelled) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        cameraStreamRef.current = stream;
+        const video = videoRef.current;
+        if (video) {
+          video.srcObject = stream;
+          await video.play().catch(() => {});
+        }
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- BarcodeDetector ainda nao tem tipos oficiais do TS
+        const DetectorCtor = (window as any).BarcodeDetector;
+        const detector = new DetectorCtor({
+          formats: ["code_128", "code_39", "codabar", "itf", "ean_13", "qr_code"],
+        });
+
+        const tick = async () => {
+          if (cancelled || !videoRef.current) return;
+          try {
+            const codes = await detector.detect(videoRef.current);
+            if (codes.length > 0) {
+              const raw = String(codes[0].rawValue || "").replace(/\D/g, "");
+              if (scannerTarget === "invoiceKey" && raw.length >= 44) {
+                handleInvoiceKeyChange(raw.slice(0, 44));
+                setScannerTarget(null);
+                return;
+              }
+              if (scannerTarget === "newItemCode" && raw.length > 0) {
+                setNewItem((current) => ({ ...current, code: raw }));
+                setScannerTarget(null);
+                return;
+              }
+            }
+          } catch {
+            // frame nao decodificavel ainda, tenta o proximo
+          }
+          if (!cancelled) scanFrameRef.current = requestAnimationFrame(tick);
+        };
+        scanFrameRef.current = requestAnimationFrame(tick);
+      } catch {
+        if (!cancelled) {
+          setCameraError(
+            "Nao foi possivel acessar a camera. Verifique a permissao do navegador.",
+          );
+          setScannerTarget(null);
+        }
+      }
+    }
+
+    start();
+
+    return () => {
+      cancelled = true;
+      if (scanFrameRef.current) cancelAnimationFrame(scanFrameRef.current);
+      if (cameraStreamRef.current) {
+        cameraStreamRef.current.getTracks().forEach((track) => track.stop());
+        cameraStreamRef.current = null;
+      }
+    };
+  }, [scannerTarget, barcodeScannerSupported]);
+
+  function openKeyScanner() {
+    if (!barcodeScannerSupported) {
+      setCameraError(
+        "Este navegador nao suporta leitura de codigo de barras pela camera. Cole ou digite a chave.",
+      );
+      return;
+    }
+    setCameraError("");
+    setScannerTarget("invoiceKey");
+  }
+
+  function openItemCodeScanner() {
+    if (!barcodeScannerSupported) {
+      setCameraError(
+        "Este navegador nao suporta leitura de codigo de barras pela camera. Digite o codigo.",
+      );
+      return;
+    }
+    setCameraError("");
+    setScannerTarget("newItemCode");
+  }
+
+  function closeScanner() {
+    setScannerTarget(null);
+  }
+
+  function handleNotePhotoChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setNotePhotoUrl((current) => {
+      if (current) URL.revokeObjectURL(current);
+      return URL.createObjectURL(file);
+    });
+    setScanState("done");
+  }
+
   function clearReceiving() {
     const confirmed = window.confirm(
       "Limpar o recebimento atual? Isso apaga a chave, os itens, quantidades e observacoes salvos neste navegador.",
@@ -218,19 +341,15 @@ export default function Home() {
     setWhatsappMessage("");
     setCopyFeedback("");
     setScanState("idle");
+    setNotePhotoUrl((current) => {
+      if (current) URL.revokeObjectURL(current);
+      return null;
+    });
     try {
       window.localStorage.removeItem(STORAGE_KEY);
     } catch {
       // ignora
     }
-  }
-
-  function simulateScan() {
-    setScanState("reading");
-    window.setTimeout(() => {
-      setScanState("done");
-      setActiveTab("Conferencia");
-    }, 900);
   }
 
   function useKeyAndImportItems() {
@@ -740,26 +859,63 @@ export default function Home() {
 
               {scanMode === "photo" ? (
                 <div className="mt-5 flex min-h-72 flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 p-5 text-center sm:min-h-80">
-                  <div className="grid h-20 w-20 place-items-center rounded-xl bg-[#09233f] text-3xl font-bold text-white sm:h-24 sm:w-24 sm:text-4xl">
-                    NF
-                  </div>
-                  <h3 className="mt-5 text-lg font-semibold">
-                    Posicione a nota dentro da moldura
-                  </h3>
-                  <p className="mt-2 max-w-sm text-sm leading-6 text-slate-600">
-                    A primeira versao aceita foto da nota. Depois conectamos OCR
-                    real, leitura de QR Code e importacao por chave de acesso.
-                  </p>
+                  <input
+                    accept="image/*"
+                    capture="environment"
+                    className="hidden"
+                    onChange={handleNotePhotoChange}
+                    ref={notePhotoInputRef}
+                    type="file"
+                  />
 
-                  <button
-                    className="mt-5 w-full rounded-xl bg-emerald-500 px-5 py-3.5 text-sm font-bold text-emerald-950 shadow-sm transition hover:bg-emerald-400 active:scale-[0.98] sm:w-auto sm:py-3"
-                    onClick={simulateScan}
-                    type="button"
-                  >
-                    {scanState === "reading"
-                      ? "Lendo nota..."
-                      : "Simular leitura da nota"}
-                  </button>
+                  {notePhotoUrl ? (
+                    <>
+                      {/* eslint-disable-next-line @next/next/no-img-element -- blob: local do arquivo capturado na hora; next/image nao otimiza (nem precisa) URLs de objeto locais */}
+                      <img
+                        alt="Foto da nota capturada"
+                        className="max-h-56 w-full rounded-xl border border-slate-200 object-contain"
+                        src={notePhotoUrl}
+                      />
+                      <p className="mt-4 max-w-sm text-sm leading-6 text-slate-600">
+                        Foto capturada e guardada como evidencia do
+                        recebimento. A leitura automatica dos produtos (OCR)
+                        ainda nao esta disponivel nesta fase — use a chave de
+                        acesso pela camera ou cadastre os itens na
+                        conferencia.
+                      </p>
+                      <button
+                        className="mt-4 rounded-xl border border-slate-300 bg-white px-5 py-3 text-sm font-bold text-slate-700 transition hover:bg-slate-50"
+                        onClick={() => notePhotoInputRef.current?.click()}
+                        type="button"
+                      >
+                        Tirar outra foto
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <div className="grid h-20 w-20 place-items-center rounded-xl bg-[#09233f] text-3xl font-bold text-white sm:h-24 sm:w-24 sm:text-4xl">
+                        NF
+                      </div>
+                      <h3 className="mt-5 text-lg font-semibold">
+                        Fotografe a nota com a camera
+                      </h3>
+                      <p className="mt-2 max-w-sm text-sm leading-6 text-slate-600">
+                        Abre a camera do aparelho de verdade e guarda a foto
+                        como evidencia. A leitura automatica dos itens (OCR)
+                        ainda nao esta disponivel — para importar sem digitar,
+                        use a chave de acesso pela camera ao lado.
+                      </p>
+
+                      <button
+                        className="mt-5 flex items-center justify-center gap-2 rounded-xl bg-emerald-500 px-5 py-3.5 text-sm font-bold text-emerald-950 shadow-sm transition hover:bg-emerald-400 active:scale-[0.98] sm:w-auto sm:py-3"
+                        onClick={() => notePhotoInputRef.current?.click()}
+                        type="button"
+                      >
+                        <IconCamera className="h-4 w-4" />
+                        Tirar foto da nota
+                      </button>
+                    </>
+                  )}
                 </div>
               ) : (
                 <div className="mt-5 min-h-72 rounded-xl border border-slate-200 bg-slate-50 p-4 sm:min-h-80 sm:p-5">
@@ -769,9 +925,9 @@ export default function Home() {
                         Chave de acesso da NF-e
                       </h3>
                       <p className="mt-2 text-sm leading-6 text-slate-600">
-                        Cole ou digite os 44 numeros da chave — com pontos,
-                        tracos ou espacos, tanto faz. O app limpa, formata em
-                        blocos e valida automaticamente.
+                        Aponte a camera para o codigo de barras ou QR da DANFE
+                        para nao digitar nada. Se preferir, cole ou digite os
+                        44 numeros — com pontos, tracos ou espacos, tanto faz.
                       </p>
                     </div>
                     <span
@@ -786,9 +942,25 @@ export default function Home() {
                     </span>
                   </div>
 
+                  <button
+                    className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-[#09233f] px-5 py-3.5 text-sm font-bold text-white transition hover:bg-[#12385f] active:scale-[0.98] sm:py-3"
+                    onClick={openKeyScanner}
+                    type="button"
+                  >
+                    <IconCamera className="h-4 w-4" />
+                    Escanear codigo de barras / QR com a camera
+                  </button>
+
+                  {cameraError && (
+                    <p className="mt-2 flex items-start gap-2 text-xs font-semibold leading-5 text-amber-700">
+                      <IconAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      {cameraError}
+                    </p>
+                  )}
+
                   <div className="mt-5 flex items-center justify-between gap-3">
                     <label className="text-sm font-bold text-slate-700" htmlFor="invoice-key-input">
-                      Chave de acesso da NF-e
+                      Ou cole/digite a chave
                     </label>
                     <button
                       className="flex shrink-0 items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 transition hover:bg-slate-100"
@@ -821,11 +993,19 @@ export default function Home() {
                     </p>
                   )}
 
-                  {invoiceKeyTouched && !isInvoiceKeyValid && (
+                  {invoiceKeyTouched && !isInvoiceKeyComplete && (
                     <p className="mt-3 flex items-start gap-2 rounded-lg bg-rose-50 p-3 text-xs font-semibold leading-5 text-rose-800">
                       <IconAlert className="mt-0.5 h-4 w-4 shrink-0" />
-                      Chave invalida: a NF-e precisa de exatamente 44 numeros.
+                      Chave incompleta: a NF-e precisa de exatamente 44 numeros.
                       Faltam {44 - cleanInvoiceKey.length} digito(s).
+                    </p>
+                  )}
+
+                  {isInvoiceKeyComplete && !isInvoiceKeyChecksumValid && (
+                    <p className="mt-3 flex items-start gap-2 rounded-lg bg-rose-50 p-3 text-xs font-semibold leading-5 text-rose-800">
+                      <IconAlert className="mt-0.5 h-4 w-4 shrink-0" />
+                      Chave incorreta: o digito verificador nao confere. Confira
+                      se todos os numeros foram digitados/escaneados certinho.
                     </p>
                   )}
 
@@ -880,9 +1060,15 @@ export default function Home() {
                   }
                 />
                 <ProcessCard
-                  detail="Limpa separadores, formata em blocos e valida os 44 digitos."
+                  detail="Limpa separadores, formata em blocos e confere o digito verificador."
                   label="Validacao da chave"
-                  status={isInvoiceKeyValid ? "44 digitos OK" : "Incompleta"}
+                  status={
+                    isInvoiceKeyValid
+                      ? "Chave valida"
+                      : isInvoiceKeyComplete
+                        ? "Digito nao confere"
+                        : "Incompleta"
+                  }
                 />
                 <ProcessCard
                   detail="Extrai codigo, descricao, unidade e quantidade."
@@ -946,16 +1132,27 @@ export default function Home() {
                     Enquanto a importacao automatica nao esta conectada,
                     cadastre os produtos manualmente.
                   </p>
-                  <div className="mt-3 grid gap-2 sm:grid-cols-[0.7fr_1.6fr_0.6fr_0.7fr_auto]">
-                    <input
-                      aria-label="Codigo do produto"
-                      className="rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-cyan-600"
-                      onChange={(event) =>
-                        setNewItem((current) => ({ ...current, code: event.target.value }))
-                      }
-                      placeholder="Codigo"
-                      value={newItem.code}
-                    />
+                  <div className="mt-3 grid gap-2 sm:grid-cols-[0.9fr_1.6fr_0.6fr_0.7fr_auto]">
+                    <div className="flex gap-1">
+                      <input
+                        aria-label="Codigo do produto"
+                        className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-cyan-600"
+                        onChange={(event) =>
+                          setNewItem((current) => ({ ...current, code: event.target.value }))
+                        }
+                        placeholder="Codigo"
+                        value={newItem.code}
+                      />
+                      <button
+                        aria-label="Escanear codigo de barras do produto"
+                        className="flex shrink-0 items-center justify-center rounded-lg border border-slate-300 bg-white px-2.5 text-slate-600 transition hover:bg-slate-100"
+                        onClick={openItemCodeScanner}
+                        title="Escanear codigo de barras"
+                        type="button"
+                      >
+                        <IconCamera className="h-4 w-4" />
+                      </button>
+                    </div>
                     <input
                       aria-label="Nome do produto"
                       className="rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-cyan-600"
@@ -994,6 +1191,12 @@ export default function Home() {
                       Adicionar
                     </button>
                   </div>
+                  {cameraError && scannerTarget === null && (
+                    <p className="mt-2 flex items-start gap-2 text-xs font-semibold leading-5 text-amber-700">
+                      <IconAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      {cameraError}
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -1834,6 +2037,29 @@ export default function Home() {
           ))}
         </div>
       </nav>
+
+      {scannerTarget && (
+        <div className="no-print fixed inset-0 z-50 flex flex-col items-center justify-center gap-4 bg-black/90 p-4">
+          <video
+            className="max-h-[65vh] w-full max-w-md rounded-2xl bg-black"
+            muted
+            playsInline
+            ref={videoRef}
+          />
+          <p className="max-w-xs text-center text-sm text-white">
+            {scannerTarget === "invoiceKey"
+              ? "Aponte para o codigo de barras ou QR da chave de acesso."
+              : "Aponte para o codigo de barras do produto."}
+          </p>
+          <button
+            className="rounded-xl bg-white px-6 py-3 text-sm font-bold text-slate-900 transition active:scale-[0.98]"
+            onClick={closeScanner}
+            type="button"
+          >
+            Cancelar
+          </button>
+        </div>
+      )}
     </main>
   );
 }
@@ -2054,6 +2280,27 @@ function formatInvoiceKey(digitsOnly: string) {
   return digitsOnly.match(/.{1,4}/g)?.join(" ") ?? "";
 }
 
+// Digito verificador real da chave de acesso da NF-e (modulo 11), conforme o
+// manual de especificacoes tecnicas da NF-e. Nao depende de internet nem de
+// consulta ao SEFAZ: e so matematica sobre os 43 primeiros digitos da chave.
+function computeNfeCheckDigit(first43Digits: string) {
+  const weights = [2, 3, 4, 5, 6, 7, 8, 9];
+  let sum = 0;
+  let weightIndex = 0;
+  for (let i = first43Digits.length - 1; i >= 0; i--) {
+    sum += Number(first43Digits[i]) * weights[weightIndex % weights.length];
+    weightIndex++;
+  }
+  const remainder = sum % 11;
+  return remainder < 2 ? 0 : 11 - remainder;
+}
+
+function isValidNfeKeyChecksum(key44Digits: string) {
+  if (key44Digits.length !== 44) return false;
+  const expectedDv = computeNfeCheckDigit(key44Digits.slice(0, 43));
+  return expectedDv === Number(key44Digits[43]);
+}
+
 function parseInvoiceKey(key: string) {
   if (key.length < 25) {
     return {
@@ -2190,6 +2437,19 @@ function IconClipboard({ className }: IconProps) {
       <rect height="16" rx="1.5" width="12" x="6" y="5" />
       <path d="M9 5V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v1" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M9 11h6M9 15h6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function IconCamera({ className }: IconProps) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+      <path
+        d="M4 8.5a1.5 1.5 0 0 1 1.5-1.5h2l1-2h7l1 2h2A1.5 1.5 0 0 1 20 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5v-9Z"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <circle cx="12" cy="13" r="3.5" />
     </svg>
   );
 }
