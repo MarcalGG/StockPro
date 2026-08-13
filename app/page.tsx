@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type ItemStatus = "Conferido" | "Divergente" | "Pendente";
 type ScanMode = "photo" | "key";
@@ -17,17 +17,35 @@ type InvoiceItem = {
   validity: string;
   damaged: boolean;
   note: string;
+  shortageFlag: boolean;
+  surplusFlag: boolean;
+  shortValidity: boolean;
+  missingBatchFlag: boolean;
   status: ItemStatus;
 };
 
-function computeItemStatus(
-  received: number,
-  expected: number,
-  damaged: boolean,
-): ItemStatus {
-  if (received === 0) return "Pendente";
-  if (damaged) return "Divergente";
-  return received === expected ? "Conferido" : "Divergente";
+function computeItemStatus(item: {
+  received: number;
+  expected: number;
+  damaged: boolean;
+  shortageFlag: boolean;
+  surplusFlag: boolean;
+}): ItemStatus {
+  if (item.damaged || item.shortageFlag || item.surplusFlag) return "Divergente";
+  if (item.received === 0) return "Pendente";
+  return item.received === item.expected ? "Conferido" : "Divergente";
+}
+
+function hasShortage(item: InvoiceItem) {
+  return item.shortageFlag || (item.received > 0 && item.received < item.expected);
+}
+
+function hasSurplus(item: InvoiceItem) {
+  return item.surplusFlag || item.received > item.expected;
+}
+
+function hasMissingBatch(item: InvoiceItem) {
+  return item.missingBatchFlag || (item.received > 0 && !item.batch);
 }
 
 const initialItems: InvoiceItem[] = [];
@@ -42,6 +60,8 @@ type InventoryRow = {
 
 const initialInventoryRows: InventoryRow[] = [];
 
+const newItemDefault = { code: "", product: "", unit: "UN", expected: "" };
+
 const tabs: { id: TabId; label: string; icon: (props: IconProps) => React.ReactElement }[] = [
   { id: "Recebimento", label: "Receber", icon: IconInbox },
   { id: "Conferencia", label: "Conferir", icon: IconCheckList },
@@ -49,7 +69,7 @@ const tabs: { id: TabId; label: string; icon: (props: IconProps) => React.ReactE
   { id: "Relatorio", label: "Relatorio", icon: IconDoc },
 ];
 
-const sampleInvoiceKey = "13260812345678000195550010004821191012345678";
+const STORAGE_KEY = "stockscan-pro:recebimento-atual";
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState<TabId>("Recebimento");
@@ -59,7 +79,7 @@ export default function Home() {
   );
   const [invoiceKey, setInvoiceKey] = useState("");
   const [pasteError, setPasteError] = useState("");
-  const [items, setItems] = useState(initialItems);
+  const [items, setItems] = useState<InvoiceItem[]>(initialItems);
   const [nextItemId, setNextItemId] = useState(1);
   const [receivingNotes, setReceivingNotes] = useState("");
   const [finalizedAt, setFinalizedAt] = useState<string | null>(null);
@@ -67,8 +87,12 @@ export default function Home() {
   const [supplier, setSupplier] = useState("");
   const [responsible, setResponsible] = useState("");
   const [entryDateTime, setEntryDateTime] = useState("");
-  const [inventoryRows, setInventoryRows] = useState(initialInventoryRows);
-  const [newItem, setNewItem] = useState({ code: "", product: "", unit: "UN", expected: "" });
+  const [inventoryRows, setInventoryRows] = useState<InventoryRow[]>(initialInventoryRows);
+  const [newItem, setNewItem] = useState(newItemDefault);
+  const [whatsappMessage, setWhatsappMessage] = useState("");
+  const [copyFeedback, setCopyFeedback] = useState("");
+  const hasHydrated = useRef(false);
+
   const cleanInvoiceKey = invoiceKey.replace(/\D/g, "").slice(0, 44);
   const isInvoiceKeyValid = cleanInvoiceKey.length === 44;
   const invoiceKeyParts = parseInvoiceKey(cleanInvoiceKey);
@@ -79,9 +103,7 @@ export default function Home() {
     const expected = items.reduce((sum, item) => sum + item.expected, 0);
     const received = items.reduce((sum, item) => sum + item.received, 0);
     const pending = items.filter((item) => item.status === "Pendente").length;
-    const divergent = items.filter(
-      (item) => item.status === "Divergente",
-    ).length;
+    const divergent = items.filter((item) => item.status === "Divergente").length;
     const done = items.filter((item) => item.status === "Conferido").length;
     const damaged = items.filter((item) => item.damaged).length;
     const missingUnits = items.reduce(
@@ -92,9 +114,10 @@ export default function Home() {
       (sum, item) => sum + Math.max(0, item.received - item.expected),
       0,
     );
-    const missingBatchOrValidity = items.filter(
-      (item) => item.received > 0 && (!item.batch || !item.validity),
-    ).length;
+    const shortageCount = items.filter(hasShortage).length;
+    const surplusCount = items.filter(hasSurplus).length;
+    const shortValidityCount = items.filter((item) => item.shortValidity).length;
+    const missingBatchCount = items.filter(hasMissingBatch).length;
 
     return {
       expected,
@@ -105,9 +128,102 @@ export default function Home() {
       damaged,
       missingUnits,
       surplusUnits,
-      missingBatchOrValidity,
+      shortageCount,
+      surplusCount,
+      shortValidityCount,
+      missingBatchCount,
     };
   }, [items]);
+
+  // Fase 5: restaura o recebimento em andamento salvo no navegador.
+  // Precisa ser um efeito (nao um initializer de useState) porque `window.localStorage`
+  // so existe no cliente; ler no render quebraria a renderizacao no servidor. Roda uma
+  // unica vez ao montar (dependencias vazias), entao nao gera loop de renders.
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const saved = JSON.parse(raw);
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- restauracao unica na montagem, guardada por [] e por hasHydrated
+        if (typeof saved.invoiceKey === "string") setInvoiceKey(saved.invoiceKey);
+        if (Array.isArray(saved.items)) setItems(saved.items);
+        if (typeof saved.nextItemId === "number") setNextItemId(saved.nextItemId);
+        if (typeof saved.receivingNotes === "string") setReceivingNotes(saved.receivingNotes);
+        if (saved.finalizedAt === null || typeof saved.finalizedAt === "string") {
+          setFinalizedAt(saved.finalizedAt);
+        }
+        if (typeof saved.invoiceNumber === "string") setInvoiceNumber(saved.invoiceNumber);
+        if (typeof saved.supplier === "string") setSupplier(saved.supplier);
+        if (typeof saved.responsible === "string") setResponsible(saved.responsible);
+        if (typeof saved.entryDateTime === "string") setEntryDateTime(saved.entryDateTime);
+        if (Array.isArray(saved.inventoryRows)) setInventoryRows(saved.inventoryRows);
+      }
+    } catch {
+      // dados salvos corrompidos: ignora e comeca do zero
+    }
+    hasHydrated.current = true;
+  }, []);
+
+  // Fase 5: salva automaticamente a cada mudanca relevante.
+  useEffect(() => {
+    if (!hasHydrated.current) return;
+    const payload = {
+      invoiceKey,
+      items,
+      nextItemId,
+      receivingNotes,
+      finalizedAt,
+      invoiceNumber,
+      supplier,
+      responsible,
+      entryDateTime,
+      inventoryRows,
+    };
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    } catch {
+      // armazenamento indisponivel ou cheio: ignora
+    }
+  }, [
+    invoiceKey,
+    items,
+    nextItemId,
+    receivingNotes,
+    finalizedAt,
+    invoiceNumber,
+    supplier,
+    responsible,
+    entryDateTime,
+    inventoryRows,
+  ]);
+
+  function clearReceiving() {
+    const confirmed = window.confirm(
+      "Limpar o recebimento atual? Isso apaga a chave, os itens, quantidades e observacoes salvos neste navegador.",
+    );
+    if (!confirmed) return;
+
+    setInvoiceKey("");
+    setPasteError("");
+    setItems([]);
+    setNextItemId(1);
+    setReceivingNotes("");
+    setFinalizedAt(null);
+    setInvoiceNumber("");
+    setSupplier("");
+    setResponsible("");
+    setEntryDateTime("");
+    setInventoryRows([]);
+    setNewItem(newItemDefault);
+    setWhatsappMessage("");
+    setCopyFeedback("");
+    setScanState("idle");
+    try {
+      window.localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      // ignora
+    }
+  }
 
   function simulateScan() {
     setScanState("reading");
@@ -117,22 +233,20 @@ export default function Home() {
     }, 900);
   }
 
-  function simulateKeyScan() {
-    if (!isInvoiceKeyValid) {
-      return;
-    }
+  function useKeyAndImportItems() {
+    if (!isInvoiceKeyValid) return;
 
     setScanState("reading");
     window.setTimeout(() => {
       setScanState("done");
+      setInvoiceNumber((current) => {
+        if (current.trim()) return current;
+        const raw = cleanInvoiceKey.slice(25, 34);
+        if (raw.length !== 9) return current;
+        return `${raw.slice(0, 3)}.${raw.slice(3, 6)}.${raw.slice(6, 9)}`;
+      });
       setActiveTab("Conferencia");
     }, 700);
-  }
-
-  function simulateBarcodeRead() {
-    setInvoiceKey(sampleInvoiceKey);
-    setPasteError("");
-    setScanState("idle");
   }
 
   function handleInvoiceKeyChange(value: string) {
@@ -160,14 +274,16 @@ export default function Home() {
     const received = Number(value);
     setItems((current) =>
       current.map((item) => {
-        if (item.id !== id) {
-          return item;
-        }
+        if (item.id !== id) return item;
 
         const nextReceived = Number.isNaN(received) || received < 0 ? 0 : received;
-        const status = computeItemStatus(nextReceived, item.expected, item.damaged);
-
-        return { ...item, received: nextReceived, status };
+        const next = {
+          ...item,
+          received: nextReceived,
+          shortageFlag: nextReceived >= item.expected ? false : item.shortageFlag,
+          surplusFlag: nextReceived <= item.expected ? false : item.surplusFlag,
+        };
+        return { ...next, status: computeItemStatus(next) };
       }),
     );
   }
@@ -175,9 +291,12 @@ export default function Home() {
   function updateField(id: number, field: "batch" | "validity" | "note", value: string) {
     if (isFinalized) return;
     setItems((current) =>
-      current.map((item) =>
-        item.id === id ? { ...item, [field]: value } : item,
-      ),
+      current.map((item) => {
+        if (item.id !== id) return item;
+        const next = { ...item, [field]: value };
+        if (field === "batch" && value.trim()) next.missingBatchFlag = false;
+        return next;
+      }),
     );
   }
 
@@ -201,11 +320,15 @@ export default function Home() {
         validity: "",
         damaged: false,
         note: "",
+        shortageFlag: false,
+        surplusFlag: false,
+        shortValidity: false,
+        missingBatchFlag: false,
         status: "Pendente",
       },
     ]);
     setNextItemId((current) => current + 1);
-    setNewItem({ code: "", product: "", unit: "UN", expected: "" });
+    setNewItem(newItemDefault);
   }
 
   function removeItem(id: number) {
@@ -220,11 +343,7 @@ export default function Home() {
     ]);
   }
 
-  function updateInventoryRow(
-    index: number,
-    field: keyof InventoryRow,
-    value: string,
-  ) {
+  function updateInventoryRow(index: number, field: keyof InventoryRow, value: string) {
     setInventoryRows((current) =>
       current.map((row, i) => (i === index ? { ...row, [field]: value } : row)),
     );
@@ -234,15 +353,66 @@ export default function Home() {
     setInventoryRows((current) => current.filter((_, i) => i !== index));
   }
 
+  // Fase 2: acoes rapidas por produto.
+  function markReceivedAll(id: number) {
+    if (isFinalized) return;
+    setItems((current) =>
+      current.map((item) => {
+        if (item.id !== id) return item;
+        const next = { ...item, received: item.expected, shortageFlag: false, surplusFlag: false };
+        return { ...next, status: computeItemStatus(next) };
+      }),
+    );
+  }
+
+  function toggleShortage(id: number) {
+    if (isFinalized) return;
+    setItems((current) =>
+      current.map((item) => {
+        if (item.id !== id) return item;
+        const next = { ...item, shortageFlag: !item.shortageFlag, surplusFlag: false };
+        return { ...next, status: computeItemStatus(next) };
+      }),
+    );
+  }
+
+  function toggleSurplus(id: number) {
+    if (isFinalized) return;
+    setItems((current) =>
+      current.map((item) => {
+        if (item.id !== id) return item;
+        const next = { ...item, surplusFlag: !item.surplusFlag, shortageFlag: false };
+        return { ...next, status: computeItemStatus(next) };
+      }),
+    );
+  }
+
   function toggleDamaged(id: number) {
     if (isFinalized) return;
     setItems((current) =>
       current.map((item) => {
         if (item.id !== id) return item;
-        const nextDamaged = !item.damaged;
-        const status = computeItemStatus(item.received, item.expected, nextDamaged);
-        return { ...item, damaged: nextDamaged, status };
+        const next = { ...item, damaged: !item.damaged };
+        return { ...next, status: computeItemStatus(next) };
       }),
+    );
+  }
+
+  function toggleShortValidity(id: number) {
+    if (isFinalized) return;
+    setItems((current) =>
+      current.map((item) =>
+        item.id === id ? { ...item, shortValidity: !item.shortValidity } : item,
+      ),
+    );
+  }
+
+  function toggleMissingBatch(id: number) {
+    if (isFinalized) return;
+    setItems((current) =>
+      current.map((item) =>
+        item.id === id ? { ...item, missingBatchFlag: !item.missingBatchFlag } : item,
+      ),
     );
   }
 
@@ -286,6 +456,8 @@ export default function Home() {
         "Validade",
         "Avaria",
         "Observacao da avaria",
+        "Validade curta",
+        "Lote nao informado",
         "Status",
       ],
       ...items.map((item) => [
@@ -299,18 +471,16 @@ export default function Home() {
         item.validity || "nao informada",
         item.damaged ? "Sim" : "Nao",
         item.damaged ? item.note || "sem descricao" : "",
+        item.shortValidity ? "Sim" : "Nao",
+        hasMissingBatch(item) ? "Sim" : "Nao",
         item.status,
       ]),
       [],
       ["Observacoes do recebimento", receivingNotes || "nenhuma"],
     ];
 
-    const csv = rows
-      .map((row) => row.map(escapeCsvCell).join(";"))
-      .join("\r\n");
-    const blob = new Blob(["﻿" + csv], {
-      type: "text/csv;charset=utf-8;",
-    });
+    const csv = rows.map((row) => row.map(escapeCsvCell).join(";")).join("\r\n");
+    const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
@@ -319,6 +489,79 @@ export default function Home() {
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
+  }
+
+  // Fase 4: mensagem pronta para WhatsApp.
+  function buildWhatsappMessage() {
+    const lines: string[] = [];
+    const nf = invoiceNumber.trim() || "(numero nao informado)";
+    const header = supplier.trim()
+      ? `Recebimento NF ${nf} - ${supplier.trim()}.`
+      : `Recebimento NF ${nf}.`;
+    lines.push(header);
+    if (responsible.trim()) lines.push(`Responsavel: ${responsible.trim()}.`);
+    if (entryDateTime.trim()) lines.push(`Data/hora: ${entryDateTime.trim()}.`);
+    lines.push("");
+
+    const problems = items.filter(
+      (item) => item.status !== "Conferido" || item.shortValidity || hasMissingBatch(item),
+    );
+
+    if (items.length === 0) {
+      lines.push("Nenhum item cadastrado ainda nesta conferencia.");
+    } else if (problems.length === 0) {
+      lines.push("Nenhuma divergencia encontrada. Recebimento conferido sem problemas.");
+    } else {
+      lines.push(`Divergencias encontradas (${problems.length}):`);
+      problems.forEach((item) => {
+        const parts: string[] = [];
+        if (item.received === 0 && !item.shortageFlag) {
+          parts.push("ainda nao conferido");
+        } else if (hasShortage(item)) {
+          const missing = Math.max(0, item.expected - item.received);
+          parts.push(
+            missing > 0
+              ? `nota ${item.expected}, recebido ${item.received}, faltaram ${missing} unidade(s)`
+              : "marcado como falta",
+          );
+        } else if (hasSurplus(item)) {
+          const surplus = Math.max(0, item.received - item.expected);
+          parts.push(
+            surplus > 0
+              ? `nota ${item.expected}, recebido ${item.received}, sobraram ${surplus} unidade(s)`
+              : "marcado como sobra",
+          );
+        }
+        if (item.damaged) parts.push(`avaria${item.note ? `: ${item.note}` : ""}`);
+        if (hasMissingBatch(item)) parts.push("lote nao informado");
+        if (item.shortValidity) parts.push("validade curta");
+        lines.push(`- ${item.product}: ${parts.join("; ") || "verificar"}.`);
+      });
+    }
+
+    if (receivingNotes.trim()) {
+      lines.push("");
+      lines.push(`Observacoes: ${receivingNotes.trim()}`);
+    }
+
+    lines.push("");
+    lines.push("Favor verificar.");
+    return lines.join("\n");
+  }
+
+  function generateWhatsappMessage() {
+    setWhatsappMessage(buildWhatsappMessage());
+    setCopyFeedback("");
+  }
+
+  async function copyWhatsappMessage() {
+    try {
+      await navigator.clipboard.writeText(whatsappMessage);
+      setCopyFeedback("Mensagem copiada!");
+    } catch {
+      setCopyFeedback("Nao foi possivel copiar automaticamente. Selecione o texto e copie manualmente.");
+    }
+    window.setTimeout(() => setCopyFeedback(""), 3000);
   }
 
   return (
@@ -416,6 +659,14 @@ export default function Home() {
                   }
                 />
               </div>
+
+              <button
+                className="mt-4 text-xs font-bold text-rose-200 underline decoration-dotted underline-offset-2 hover:text-rose-100"
+                onClick={clearReceiving}
+                type="button"
+              >
+                Limpar recebimento atual
+              </button>
             </section>
           </div>
         </header>
@@ -453,8 +704,8 @@ export default function Home() {
                     Capturar nota fiscal
                   </h2>
                   <p className="mt-2 text-sm leading-6 text-slate-600">
-                    Use a foto da nota em papel ou escaneie a chave de acesso
-                    com 44 digitos para preparar a conferencia.
+                    Use a foto da nota em papel ou cole a chave de acesso com
+                    44 digitos para preparar a conferencia.
                   </p>
                 </div>
                 <span className="hidden shrink-0 rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-600 sm:inline-block">
@@ -515,12 +766,12 @@ export default function Home() {
                   <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
                     <div>
                       <h3 className="text-lg font-semibold">
-                        Escanear chave de acesso
+                        Chave de acesso da NF-e
                       </h3>
                       <p className="mt-2 text-sm leading-6 text-slate-600">
-                        Leia o codigo de barras da DANFE ou cole os 44 numeros
-                        da chave. O app formata e valida o tamanho antes de
-                        importar.
+                        Cole ou digite os 44 numeros da chave — com pontos,
+                        tracos ou espacos, tanto faz. O app limpa, formata em
+                        blocos e valida automaticamente.
                       </p>
                     </div>
                     <span
@@ -559,7 +810,7 @@ export default function Home() {
                       const text = event.clipboardData.getData("text");
                       handleInvoiceKeyChange(cleanInvoiceKey + text);
                     }}
-                    placeholder="Digite, cole ou escaneie os 44 digitos"
+                    placeholder="Digite ou cole os 44 digitos"
                     value={formatInvoiceKey(invoiceKey)}
                   />
 
@@ -595,26 +846,20 @@ export default function Home() {
                     <KeyInfo label="Numero da NF" value={invoiceKeyParts.number} />
                   </div>
 
-                  <div className="mt-5 flex flex-col gap-3 sm:flex-row">
-                    <button
-                      className="flex items-center justify-center gap-2 rounded-xl bg-[#09233f] px-5 py-3.5 text-sm font-bold text-white transition hover:bg-[#12385f] active:scale-[0.98] sm:py-3"
-                      onClick={simulateBarcodeRead}
-                      type="button"
-                    >
-                      <IconScan className="h-4 w-4" />
-                      Escanear codigo de barras
-                    </button>
-                    <button
-                      className="rounded-xl bg-emerald-500 px-5 py-3.5 text-sm font-bold text-emerald-950 shadow-sm transition hover:bg-emerald-400 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500 sm:py-3"
-                      disabled={!isInvoiceKeyValid || scanState === "reading"}
-                      onClick={simulateKeyScan}
-                      type="button"
-                    >
-                      {scanState === "reading"
-                        ? "Validando chave..."
-                        : "Importar pela chave"}
-                    </button>
-                  </div>
+                  <button
+                    className="mt-5 w-full rounded-xl bg-emerald-500 px-5 py-3.5 text-sm font-bold text-emerald-950 shadow-sm transition hover:bg-emerald-400 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500 sm:py-3"
+                    disabled={!isInvoiceKeyValid || scanState === "reading"}
+                    onClick={useKeyAndImportItems}
+                    type="button"
+                  >
+                    {scanState === "reading"
+                      ? "Validando chave..."
+                      : "Usar chave e importar itens"}
+                  </button>
+                  <p className="mt-2 text-xs leading-5 text-slate-500">
+                    Ao confirmar, o numero da nota e preenchido automaticamente
+                    e voce vai direto para a conferencia.
+                  </p>
                 </div>
               )}
             </div>
@@ -635,7 +880,7 @@ export default function Home() {
                   }
                 />
                 <ProcessCard
-                  detail="Com chave validada, prepara a consulta do XML da nota quando o servico estiver conectado."
+                  detail="Limpa separadores, formata em blocos e valida os 44 digitos."
                   label="Validacao da chave"
                   status={isInvoiceKeyValid ? "44 digitos OK" : "Incompleta"}
                 />
@@ -643,18 +888,16 @@ export default function Home() {
                   detail="Extrai codigo, descricao, unidade e quantidade."
                   label="Itens importados"
                   status={
-                    items.length > 0
-                      ? `${items.length} na lista`
-                      : "Nenhum ainda"
+                    items.length > 0 ? `${items.length} na lista` : "Nenhum ainda"
                   }
                 />
                 <ProcessCard
-                  detail="Cria campos para recebido, lote, validade e avarias."
+                  detail="Botoes rapidos para recebido, falta, sobra, avaria, validade e lote."
                   label="Conferencia fisica"
                   status="Preparada"
                 />
                 <ProcessCard
-                  detail="Gera PDF/Excel com faltas, sobras e validade curta."
+                  detail="Gera PDF/Excel e mensagem pronta para WhatsApp com as divergencias."
                   label="Relatorio final"
                   status="Ao finalizar"
                 />
@@ -673,8 +916,8 @@ export default function Home() {
                     Conferencia de recebimento
                   </h2>
                   <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
-                    Ajuste a quantidade recebida, marque avaria quando houver e
-                    registre lote e validade. O status muda automaticamente.
+                    Use os botoes rapidos para marcar cada produto sem digitar.
+                    O status muda automaticamente.
                   </p>
                 </div>
                 <div className="grid grid-cols-4 gap-2 text-center">
@@ -766,9 +1009,7 @@ export default function Home() {
                 {items.map((item) => (
                   <article
                     className={`rounded-xl border p-4 ${
-                      item.damaged
-                        ? "border-rose-200 bg-rose-50/40"
-                        : "border-slate-200"
+                      item.damaged ? "border-rose-200 bg-rose-50/40" : "border-slate-200"
                     }`}
                     key={item.id}
                   >
@@ -802,9 +1043,7 @@ export default function Home() {
                           className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-semibold outline-none focus:border-cyan-600 disabled:bg-slate-100 disabled:text-slate-500"
                           disabled={isFinalized}
                           min="0"
-                          onChange={(event) =>
-                            updateReceived(item.id, event.target.value)
-                          }
+                          onChange={(event) => updateReceived(item.id, event.target.value)}
                           type="number"
                           value={item.received}
                         />
@@ -814,9 +1053,7 @@ export default function Home() {
                     {item.received > 0 && item.received !== item.expected && (
                       <p
                         className={`mt-2 text-xs font-bold ${
-                          item.received < item.expected
-                            ? "text-rose-700"
-                            : "text-amber-700"
+                          item.received < item.expected ? "text-rose-700" : "text-amber-700"
                         }`}
                       >
                         {item.received < item.expected
@@ -825,6 +1062,59 @@ export default function Home() {
                       </p>
                     )}
 
+                    <p className="mt-3 text-xs font-bold uppercase tracking-wide text-slate-500">
+                      Acoes rapidas
+                    </p>
+                    <div className="mt-2 grid grid-cols-3 gap-2">
+                      <QuickActionButton
+                        disabled={isFinalized}
+                        icon={IconCheckCircle}
+                        label="Recebido tudo"
+                        onClick={() => markReceivedAll(item.id)}
+                        tone="green"
+                      />
+                      <QuickActionButton
+                        active={item.shortageFlag}
+                        disabled={isFinalized}
+                        icon={IconArrowDown}
+                        label="Faltou"
+                        onClick={() => toggleShortage(item.id)}
+                        tone="rose"
+                      />
+                      <QuickActionButton
+                        active={item.surplusFlag}
+                        disabled={isFinalized}
+                        icon={IconArrowUp}
+                        label="Sobrou"
+                        onClick={() => toggleSurplus(item.id)}
+                        tone="amber"
+                      />
+                      <QuickActionButton
+                        active={item.damaged}
+                        disabled={isFinalized}
+                        icon={IconAlert}
+                        label="Avaria"
+                        onClick={() => toggleDamaged(item.id)}
+                        tone="rose"
+                      />
+                      <QuickActionButton
+                        active={item.shortValidity}
+                        disabled={isFinalized}
+                        icon={IconClock}
+                        label="Validade curta"
+                        onClick={() => toggleShortValidity(item.id)}
+                        tone="amber"
+                      />
+                      <QuickActionButton
+                        active={item.missingBatchFlag}
+                        disabled={isFinalized}
+                        icon={IconTag}
+                        label="Lote nao informado"
+                        onClick={() => toggleMissingBatch(item.id)}
+                        tone="amber"
+                      />
+                    </div>
+
                     <div className="mt-3 grid grid-cols-2 gap-3">
                       <label className="block">
                         <p className="text-xs font-bold uppercase tracking-wide text-slate-500">
@@ -832,11 +1122,11 @@ export default function Home() {
                         </p>
                         <input
                           aria-label={`Lote de ${item.product}`}
-                          className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 outline-none focus:border-cyan-600 disabled:bg-slate-100 disabled:text-slate-500"
+                          className={`mt-1 w-full rounded-lg border px-3 py-2 outline-none focus:border-cyan-600 disabled:bg-slate-100 disabled:text-slate-500 ${
+                            item.missingBatchFlag ? "border-amber-400 bg-amber-50" : "border-slate-300"
+                          }`}
                           disabled={isFinalized}
-                          onChange={(event) =>
-                            updateField(item.id, "batch", event.target.value)
-                          }
+                          onChange={(event) => updateField(item.id, "batch", event.target.value)}
                           placeholder="Escanear"
                           value={item.batch}
                         />
@@ -847,39 +1137,23 @@ export default function Home() {
                         </p>
                         <input
                           aria-label={`Validade de ${item.product}`}
-                          className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 outline-none focus:border-cyan-600 disabled:bg-slate-100 disabled:text-slate-500"
+                          className={`mt-1 w-full rounded-lg border px-3 py-2 outline-none focus:border-cyan-600 disabled:bg-slate-100 disabled:text-slate-500 ${
+                            item.shortValidity ? "border-amber-400 bg-amber-50" : "border-slate-300"
+                          }`}
                           disabled={isFinalized}
-                          onChange={(event) =>
-                            updateField(item.id, "validity", event.target.value)
-                          }
+                          onChange={(event) => updateField(item.id, "validity", event.target.value)}
                           type="date"
                           value={item.validity}
                         />
                       </label>
                     </div>
 
-                    <button
-                      className={`mt-3 flex w-full items-center justify-center gap-2 rounded-lg border px-3 py-2 text-xs font-bold transition disabled:cursor-not-allowed disabled:opacity-60 ${
-                        item.damaged
-                          ? "border-rose-300 bg-rose-100 text-rose-800"
-                          : "border-slate-300 bg-white text-slate-600 hover:bg-slate-50"
-                      }`}
-                      disabled={isFinalized}
-                      onClick={() => toggleDamaged(item.id)}
-                      type="button"
-                    >
-                      <IconAlert className="h-3.5 w-3.5" />
-                      {item.damaged ? "Marcado com avaria" : "Marcar avaria"}
-                    </button>
-
                     {item.damaged && (
                       <input
                         aria-label={`Observacao de avaria de ${item.product}`}
                         className="mt-2 w-full rounded-lg border border-rose-200 bg-white px-3 py-2 text-xs outline-none focus:border-rose-500 disabled:bg-slate-100"
                         disabled={isFinalized}
-                        onChange={(event) =>
-                          updateField(item.id, "note", event.target.value)
-                        }
+                        onChange={(event) => updateField(item.id, "note", event.target.value)}
                         placeholder="Descreva a avaria"
                         value={item.note}
                       />
@@ -900,7 +1174,7 @@ export default function Home() {
 
               {/* Desktop / tablet: table */}
               <div className="mt-5 hidden overflow-x-auto sm:block">
-                <table className="w-full min-w-[1120px] border-separate border-spacing-0 text-left text-sm">
+                <table className="w-full min-w-[1320px] border-separate border-spacing-0 text-left text-sm">
                   <thead>
                     <tr className="bg-slate-100 text-xs uppercase tracking-wide text-slate-600">
                       <Th>Codigo</Th>
@@ -910,7 +1184,7 @@ export default function Home() {
                       <Th>Recebido</Th>
                       <Th>Lote</Th>
                       <Th>Validade</Th>
-                      <Th>Avaria</Th>
+                      <Th>Acoes rapidas</Th>
                       <Th>Status</Th>
                       <Th>{""}</Th>
                     </tr>
@@ -923,15 +1197,11 @@ export default function Home() {
                       >
                         <Td>{item.code}</Td>
                         <Td>
-                          <span className="font-semibold text-slate-900">
-                            {item.product}
-                          </span>
+                          <span className="font-semibold text-slate-900">{item.product}</span>
                           {item.received > 0 && item.received !== item.expected && (
                             <p
                               className={`text-xs font-bold ${
-                                item.received < item.expected
-                                  ? "text-rose-700"
-                                  : "text-amber-700"
+                                item.received < item.expected ? "text-rose-700" : "text-amber-700"
                               }`}
                             >
                               {item.received < item.expected
@@ -948,9 +1218,7 @@ export default function Home() {
                             className="w-24 rounded-lg border border-slate-300 px-3 py-2 font-semibold outline-none focus:border-cyan-600 disabled:bg-slate-100 disabled:text-slate-500"
                             disabled={isFinalized}
                             min="0"
-                            onChange={(event) =>
-                              updateReceived(item.id, event.target.value)
-                            }
+                            onChange={(event) => updateReceived(item.id, event.target.value)}
                             type="number"
                             value={item.received}
                           />
@@ -958,11 +1226,11 @@ export default function Home() {
                         <Td>
                           <input
                             aria-label={`Lote de ${item.product}`}
-                            className="w-28 rounded-lg border border-slate-300 px-3 py-2 outline-none focus:border-cyan-600 disabled:bg-slate-100 disabled:text-slate-500"
+                            className={`w-28 rounded-lg border px-3 py-2 outline-none focus:border-cyan-600 disabled:bg-slate-100 disabled:text-slate-500 ${
+                              item.missingBatchFlag ? "border-amber-400 bg-amber-50" : "border-slate-300"
+                            }`}
                             disabled={isFinalized}
-                            onChange={(event) =>
-                              updateField(item.id, "batch", event.target.value)
-                            }
+                            onChange={(event) => updateField(item.id, "batch", event.target.value)}
                             placeholder="Escanear"
                             value={item.batch}
                           />
@@ -970,29 +1238,65 @@ export default function Home() {
                         <Td>
                           <input
                             aria-label={`Validade de ${item.product}`}
-                            className="w-36 rounded-lg border border-slate-300 px-3 py-2 outline-none focus:border-cyan-600 disabled:bg-slate-100 disabled:text-slate-500"
+                            className={`w-36 rounded-lg border px-3 py-2 outline-none focus:border-cyan-600 disabled:bg-slate-100 disabled:text-slate-500 ${
+                              item.shortValidity ? "border-amber-400 bg-amber-50" : "border-slate-300"
+                            }`}
                             disabled={isFinalized}
-                            onChange={(event) =>
-                              updateField(item.id, "validity", event.target.value)
-                            }
+                            onChange={(event) => updateField(item.id, "validity", event.target.value)}
                             type="date"
                             value={item.validity}
                           />
                         </Td>
                         <Td>
-                          <button
-                            aria-pressed={item.damaged}
-                            className={`rounded-lg border px-3 py-2 text-xs font-bold transition disabled:cursor-not-allowed disabled:opacity-60 ${
-                              item.damaged
-                                ? "border-rose-300 bg-rose-100 text-rose-800"
-                                : "border-slate-300 bg-white text-slate-600 hover:bg-slate-50"
-                            }`}
-                            disabled={isFinalized}
-                            onClick={() => toggleDamaged(item.id)}
-                            type="button"
-                          >
-                            {item.damaged ? "Avariado" : "Marcar"}
-                          </button>
+                          <div className="grid w-[210px] grid-cols-3 gap-1.5">
+                            <QuickActionButton
+                              disabled={isFinalized}
+                              icon={IconCheckCircle}
+                              label="Tudo"
+                              onClick={() => markReceivedAll(item.id)}
+                              tone="green"
+                            />
+                            <QuickActionButton
+                              active={item.shortageFlag}
+                              disabled={isFinalized}
+                              icon={IconArrowDown}
+                              label="Faltou"
+                              onClick={() => toggleShortage(item.id)}
+                              tone="rose"
+                            />
+                            <QuickActionButton
+                              active={item.surplusFlag}
+                              disabled={isFinalized}
+                              icon={IconArrowUp}
+                              label="Sobrou"
+                              onClick={() => toggleSurplus(item.id)}
+                              tone="amber"
+                            />
+                            <QuickActionButton
+                              active={item.damaged}
+                              disabled={isFinalized}
+                              icon={IconAlert}
+                              label="Avaria"
+                              onClick={() => toggleDamaged(item.id)}
+                              tone="rose"
+                            />
+                            <QuickActionButton
+                              active={item.shortValidity}
+                              disabled={isFinalized}
+                              icon={IconClock}
+                              label="Validade"
+                              onClick={() => toggleShortValidity(item.id)}
+                              tone="amber"
+                            />
+                            <QuickActionButton
+                              active={item.missingBatchFlag}
+                              disabled={isFinalized}
+                              icon={IconTag}
+                              label="S/ lote"
+                              onClick={() => toggleMissingBatch(item.id)}
+                              tone="amber"
+                            />
+                          </div>
                         </Td>
                         <Td>
                           <StatusBadge status={item.status} />
@@ -1023,13 +1327,17 @@ export default function Home() {
                 Calculado em tempo real a partir da conferencia acima.
               </p>
               <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
-                <SummaryStat label="Unidades em falta" tone="red" value={totals.missingUnits} />
-                <SummaryStat label="Unidades em sobra" tone="amber" value={totals.surplusUnits} />
-                <SummaryStat label="Itens com avaria" tone="slate" value={totals.damaged} />
+                <SummaryStat label="Itens conferidos" tone="green" value={totals.done} />
+                <SummaryStat label="Itens pendentes" tone="slate" value={totals.pending} />
+                <SummaryStat label="Divergencias" tone="amber" value={totals.divergent} />
+                <SummaryStat label="Produtos com falta" tone="red" value={totals.shortageCount} />
+                <SummaryStat label="Produtos com sobra" tone="amber" value={totals.surplusCount} />
+                <SummaryStat label="Produtos com avaria" tone="red" value={totals.damaged} />
+                <SummaryStat label="Produtos sem lote" tone="amber" value={totals.missingBatchCount} />
                 <SummaryStat
-                  label="Sem lote/validade"
+                  label="Validade curta"
                   tone="amber"
-                  value={totals.missingBatchOrValidity}
+                  value={totals.shortValidityCount}
                 />
               </div>
 
@@ -1119,9 +1427,7 @@ export default function Home() {
                       <input
                         aria-label="Endereco"
                         className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-cyan-600"
-                        onChange={(event) =>
-                          updateInventoryRow(index, "location", event.target.value)
-                        }
+                        onChange={(event) => updateInventoryRow(index, "location", event.target.value)}
                         placeholder="Rua A / Palete 04"
                         value={row.location}
                       />
@@ -1133,9 +1439,7 @@ export default function Home() {
                       <input
                         aria-label="Produto"
                         className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-cyan-600"
-                        onChange={(event) =>
-                          updateInventoryRow(index, "product", event.target.value)
-                        }
+                        onChange={(event) => updateInventoryRow(index, "product", event.target.value)}
                         placeholder="Nome do produto"
                         value={row.product}
                       />
@@ -1147,9 +1451,7 @@ export default function Home() {
                       <input
                         aria-label="Quantidade"
                         className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-cyan-600"
-                        onChange={(event) =>
-                          updateInventoryRow(index, "quantity", event.target.value)
-                        }
+                        onChange={(event) => updateInventoryRow(index, "quantity", event.target.value)}
                         placeholder="148 un"
                         value={row.quantity}
                       />
@@ -1161,9 +1463,7 @@ export default function Home() {
                       <input
                         aria-label="Lotes"
                         className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-cyan-600"
-                        onChange={(event) =>
-                          updateInventoryRow(index, "lots", event.target.value)
-                        }
+                        onChange={(event) => updateInventoryRow(index, "lots", event.target.value)}
                         placeholder="2 lotes"
                         value={row.lots}
                       />
@@ -1175,9 +1475,7 @@ export default function Home() {
                       <select
                         aria-label="Status da contagem"
                         className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-cyan-600"
-                        onChange={(event) =>
-                          updateInventoryRow(index, "status", event.target.value)
-                        }
+                        onChange={(event) => updateInventoryRow(index, "status", event.target.value)}
                         value={row.status}
                       >
                         <option value="OK">OK</option>
@@ -1242,9 +1540,7 @@ export default function Home() {
 
               <p
                 className={`mt-4 flex items-start gap-2 rounded-lg p-3 text-xs font-semibold leading-5 ${
-                  isFinalized
-                    ? "bg-emerald-50 text-emerald-800"
-                    : "bg-amber-50 text-amber-800"
+                  isFinalized ? "bg-emerald-50 text-emerald-800" : "bg-amber-50 text-amber-800"
                 }`}
               >
                 {isFinalized ? (
@@ -1267,10 +1563,8 @@ export default function Home() {
                 <ReportLine label="Unidades em falta" value={`${totals.missingUnits}`} />
                 <ReportLine label="Unidades em sobra" value={`${totals.surplusUnits}`} />
                 <ReportLine label="Itens com avaria" value={`${totals.damaged}`} />
-                <ReportLine
-                  label="Itens sem lote/validade"
-                  value={`${totals.missingBatchOrValidity}`}
-                />
+                <ReportLine label="Itens sem lote" value={`${totals.missingBatchCount}`} />
+                <ReportLine label="Itens com validade curta" value={`${totals.shortValidityCount}`} />
               </div>
 
               {receivingNotes && (
@@ -1310,6 +1604,56 @@ export default function Home() {
               </p>
             </div>
 
+            <div className="no-print rounded-2xl bg-white p-4 shadow-sm sm:p-5">
+              <h3 className="text-lg font-semibold">Mensagem para WhatsApp</h3>
+              <p className="mt-1 text-sm leading-6 text-slate-600">
+                Gera um resumo pronto para colar ou enviar direto no
+                WhatsApp do fornecedor ou gerente.
+              </p>
+
+              <button
+                className="mt-4 flex items-center justify-center gap-2 rounded-xl bg-emerald-500 px-5 py-3.5 text-sm font-bold text-emerald-950 shadow-sm transition hover:bg-emerald-400 active:scale-[0.98] sm:py-3"
+                onClick={generateWhatsappMessage}
+                type="button"
+              >
+                <IconWhatsapp className="h-4 w-4" />
+                Gerar mensagem para WhatsApp
+              </button>
+
+              {whatsappMessage && (
+                <div className="mt-4">
+                  <textarea
+                    aria-label="Mensagem para WhatsApp"
+                    className="h-48 w-full resize-none rounded-lg border border-slate-300 bg-slate-50 p-3 text-sm leading-6 text-slate-800 outline-none focus:border-cyan-600"
+                    readOnly
+                    value={whatsappMessage}
+                  />
+                  <div className="mt-3 flex flex-col gap-3 sm:flex-row">
+                    <button
+                      className="flex items-center justify-center gap-2 rounded-xl border border-slate-300 px-5 py-3 text-sm font-bold text-slate-700 transition hover:bg-slate-50 active:scale-[0.98]"
+                      onClick={copyWhatsappMessage}
+                      type="button"
+                    >
+                      <IconClipboard className="h-4 w-4" />
+                      Copiar mensagem
+                    </button>
+                    <a
+                      className="flex items-center justify-center gap-2 rounded-xl bg-[#09233f] px-5 py-3 text-sm font-bold text-white transition hover:bg-[#12385f] active:scale-[0.98]"
+                      href={`https://wa.me/?text=${encodeURIComponent(whatsappMessage)}`}
+                      rel="noopener noreferrer"
+                      target="_blank"
+                    >
+                      <IconWhatsapp className="h-4 w-4" />
+                      Abrir no WhatsApp
+                    </a>
+                  </div>
+                  {copyFeedback && (
+                    <p className="mt-2 text-xs font-semibold text-emerald-700">{copyFeedback}</p>
+                  )}
+                </div>
+              )}
+            </div>
+
             <div className="rounded-2xl bg-white p-4 shadow-sm sm:p-5">
               <h3 className="text-lg font-semibold">Resumo para aprovacao</h3>
               <div className="mt-4 space-y-3">
@@ -1320,14 +1664,18 @@ export default function Home() {
                   </p>
                 )}
                 {items.length > 0 &&
-                  items.filter((item) => item.status !== "Conferido").length === 0 && (
+                  items.filter(
+                    (item) => item.status !== "Conferido" || item.shortValidity || hasMissingBatch(item),
+                  ).length === 0 && (
                     <p className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-semibold text-emerald-800">
                       Nenhuma divergencia pendente. Recebimento pronto para
                       finalizar.
                     </p>
                   )}
                 {items
-                  .filter((item) => item.status !== "Conferido")
+                  .filter(
+                    (item) => item.status !== "Conferido" || item.shortValidity || hasMissingBatch(item),
+                  )
                   .map((item) => (
                     <article
                       className="rounded-xl border border-amber-200 bg-amber-50 p-4"
@@ -1335,12 +1683,9 @@ export default function Home() {
                     >
                       <div className="flex flex-col justify-between gap-2 sm:flex-row">
                         <div>
-                          <p className="font-semibold text-amber-950">
-                            {item.product}
-                          </p>
+                          <p className="font-semibold text-amber-950">{item.product}</p>
                           <p className="mt-1 text-sm text-amber-900">
-                            Nota: {item.expected} {item.unit} | Recebido:{" "}
-                            {item.received} {item.unit}
+                            Nota: {item.expected} {item.unit} | Recebido: {item.received} {item.unit}
                             {item.received !== item.expected && (
                               <>
                                 {" "}
@@ -1359,6 +1704,11 @@ export default function Home() {
                           {item.damaged && (
                             <p className="mt-1 text-sm font-semibold text-rose-700">
                               Avaria: {item.note || "sem descricao"}
+                            </p>
+                          )}
+                          {item.shortValidity && (
+                            <p className="mt-1 text-sm font-semibold text-amber-800">
+                              Validade curta
                             </p>
                           )}
                         </div>
@@ -1382,46 +1732,75 @@ export default function Home() {
                   Nenhum item cadastrado ainda.
                 </p>
               ) : (
-              <div className="mt-4 overflow-x-auto">
-                <table className="w-full min-w-[760px] border-separate border-spacing-0 text-left text-sm">
-                  <thead>
-                    <tr className="bg-slate-100 text-xs uppercase tracking-wide text-slate-600">
-                      <Th>Codigo</Th>
-                      <Th>Produto</Th>
-                      <Th>Nota</Th>
-                      <Th>Recebido</Th>
-                      <Th>Lote</Th>
-                      <Th>Validade</Th>
-                      <Th>Avaria</Th>
-                      <Th>Status</Th>
-                    </tr>
-                  </thead>
-                  <tbody>
+                <>
+                  {/* Mobile: card list */}
+                  <div className="mt-4 grid gap-3 sm:hidden">
                     {items.map((item) => (
-                      <tr className="border-b border-slate-200" key={item.id}>
-                        <Td>{item.code}</Td>
-                        <Td>
-                          <span className="font-semibold text-slate-900">
-                            {item.product}
-                          </span>
-                        </Td>
-                        <Td>
-                          {item.expected} {item.unit}
-                        </Td>
-                        <Td>
-                          {item.received} {item.unit}
-                        </Td>
-                        <Td>{item.batch || "-"}</Td>
-                        <Td>{item.validity || "-"}</Td>
-                        <Td>{item.damaged ? "Sim" : "Nao"}</Td>
-                        <Td>
+                      <article className="rounded-xl border border-slate-200 p-4" key={item.id}>
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-xs font-bold uppercase tracking-wide text-slate-400">
+                              {item.code}
+                            </p>
+                            <p className="mt-0.5 font-semibold text-slate-900">{item.product}</p>
+                          </div>
                           <StatusBadge status={item.status} />
-                        </Td>
-                      </tr>
+                        </div>
+                        <div className="mt-2 grid grid-cols-2 gap-2 text-sm text-slate-600">
+                          <p>
+                            Nota: <strong>{item.expected} {item.unit}</strong>
+                          </p>
+                          <p>
+                            Recebido: <strong>{item.received} {item.unit}</strong>
+                          </p>
+                          <p>Lote: {item.batch || "-"}</p>
+                          <p>Validade: {item.validity || "-"}</p>
+                          <p>Avaria: {item.damaged ? "Sim" : "Nao"}</p>
+                        </div>
+                      </article>
                     ))}
-                  </tbody>
-                </table>
-              </div>
+                  </div>
+
+                  {/* Desktop / tablet: table */}
+                  <div className="mt-4 hidden overflow-x-auto sm:block">
+                    <table className="w-full min-w-[760px] border-separate border-spacing-0 text-left text-sm">
+                      <thead>
+                        <tr className="bg-slate-100 text-xs uppercase tracking-wide text-slate-600">
+                          <Th>Codigo</Th>
+                          <Th>Produto</Th>
+                          <Th>Nota</Th>
+                          <Th>Recebido</Th>
+                          <Th>Lote</Th>
+                          <Th>Validade</Th>
+                          <Th>Avaria</Th>
+                          <Th>Status</Th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {items.map((item) => (
+                          <tr className="border-b border-slate-200" key={item.id}>
+                            <Td>{item.code}</Td>
+                            <Td>
+                              <span className="font-semibold text-slate-900">{item.product}</span>
+                            </Td>
+                            <Td>
+                              {item.expected} {item.unit}
+                            </Td>
+                            <Td>
+                              {item.received} {item.unit}
+                            </Td>
+                            <Td>{item.batch || "-"}</Td>
+                            <Td>{item.validity || "-"}</Td>
+                            <Td>{item.damaged ? "Sim" : "Nao"}</Td>
+                            <Td>
+                              <StatusBadge status={item.status} />
+                            </Td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
               )}
             </div>
           </section>
@@ -1462,9 +1841,7 @@ export default function Home() {
 function Metric({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-xl border border-white/15 bg-white/10 p-3">
-      <p className="text-xs font-semibold uppercase tracking-wide text-cyan-100">
-        {label}
-      </p>
+      <p className="text-xs font-semibold uppercase tracking-wide text-cyan-100">{label}</p>
       <p className="mt-1 text-xl font-semibold sm:text-2xl">{value}</p>
     </div>
   );
@@ -1534,9 +1911,7 @@ function ProcessCard({
 function KeyInfo({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-xl bg-white p-3 ring-1 ring-slate-200">
-      <p className="text-xs font-bold uppercase tracking-wide text-slate-500">
-        {label}
-      </p>
+      <p className="text-xs font-bold uppercase tracking-wide text-slate-500">{label}</p>
       <p className="mt-1 truncate font-semibold text-slate-900">{value}</p>
     </div>
   );
@@ -1590,6 +1965,42 @@ function SummaryStat({
   );
 }
 
+function QuickActionButton({
+  active,
+  disabled,
+  icon: Icon,
+  label,
+  onClick,
+  tone,
+}: {
+  active?: boolean;
+  disabled?: boolean;
+  icon: (props: IconProps) => React.ReactElement;
+  label: string;
+  onClick: () => void;
+  tone: "green" | "amber" | "rose";
+}) {
+  const toneActive = {
+    amber: "border-amber-300 bg-amber-100 text-amber-900",
+    green: "border-emerald-300 bg-emerald-100 text-emerald-900",
+    rose: "border-rose-300 bg-rose-100 text-rose-900",
+  };
+
+  return (
+    <button
+      className={`flex flex-col items-center gap-1 rounded-lg border px-1.5 py-2 text-center text-[10.5px] font-bold leading-tight transition disabled:cursor-not-allowed disabled:opacity-50 ${
+        active ? toneActive[tone] : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+      }`}
+      disabled={disabled}
+      onClick={onClick}
+      type="button"
+    >
+      <Icon className="h-4 w-4" />
+      {label}
+    </button>
+  );
+}
+
 function Th({ children }: { children: React.ReactNode }) {
   return <th className="px-3 py-3 first:rounded-l-lg last:rounded-r-lg">{children}</th>;
 }
@@ -1606,9 +2017,7 @@ function StatusBadge({ status }: { status: ItemStatus }) {
   };
 
   return (
-    <span
-      className={`inline-flex shrink-0 rounded-full px-3 py-1 text-xs font-bold ring-1 ${colors[status]}`}
-    >
+    <span className={`inline-flex shrink-0 rounded-full px-3 py-1 text-xs font-bold ring-1 ${colors[status]}`}>
       {status}
     </span>
   );
@@ -1757,20 +2166,20 @@ function IconCheck({ className }: IconProps) {
   );
 }
 
+function IconCheckCircle({ className }: IconProps) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="9" />
+      <path d="m8 12.5 2.5 2.5L16 9.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function IconAlert({ className }: IconProps) {
   return (
     <svg className={className} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
       <path d="M12 9v4M12 17h.01" strokeLinecap="round" />
       <path d="M10.29 3.86 1.82 18a1 1 0 0 0 .86 1.5h18.64a1 1 0 0 0 .86-1.5L13.71 3.86a1 1 0 0 0-1.72 0Z" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function IconScan({ className }: IconProps) {
-  return (
-    <svg className={className} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-      <path d="M4 8V5a1 1 0 0 1 1-1h3M20 8V5a1 1 0 0 0-1-1h-3M4 16v3a1 1 0 0 0 1 1h3M20 16v3a1 1 0 0 1-1 1h-3" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M4 12h16" strokeLinecap="round" />
     </svg>
   );
 }
@@ -1781,6 +2190,61 @@ function IconClipboard({ className }: IconProps) {
       <rect height="16" rx="1.5" width="12" x="6" y="5" />
       <path d="M9 5V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v1" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M9 11h6M9 15h6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function IconArrowDown({ className }: IconProps) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+      <path d="M12 4v14M6 13l6 6 6-6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconArrowUp({ className }: IconProps) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+      <path d="M12 20V6M6 11l6-6 6 6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconClock({ className }: IconProps) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3.5 2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconTag({ className }: IconProps) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+      <path
+        d="M11.5 3.5H5a1.5 1.5 0 0 0-1.5 1.5v6.5a1.5 1.5 0 0 0 .44 1.06l9 9a1.5 1.5 0 0 0 2.12 0l6.5-6.5a1.5 1.5 0 0 0 0-2.12l-9-9a1.5 1.5 0 0 0-1.06-.44Z"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <circle cx="8.5" cy="8.5" r="1.25" />
+    </svg>
+  );
+}
+
+function IconWhatsapp({ className }: IconProps) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+      <path
+        d="M4 20l1.3-3.9A8 8 0 1 1 8.9 19L4 20Z"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M9 9.5c0 3 2.5 5.5 5.5 5.5.6 0 1-.5.9-1.1l-.2-1a.7.7 0 0 0-.7-.5l-1.3.2a4 4 0 0 1-2.3-2.3l.2-1.3a.7.7 0 0 0-.5-.7l-1-.2c-.6-.1-1.1.3-1.1.9V9.5Z"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   );
 }
