@@ -22,6 +22,7 @@ O app abre em branco (sem nota, sem itens, sem contagem de estoque) — os dados
 - Relatorio de divergencia completo: dados da nota, responsavel, todos os itens (com lote/validade/avaria) e resumo para aprovacao. Tabelas viram cards no celular, sem cortar conteudo.
 - Exportacao do relatorio: "Gerar PDF" abre a impressao do navegador (salvar como PDF) e "Exportar Excel" baixa um `.csv` com todos os itens.
 - **Configuracoes > Documentos Fiscais** (login administrativo): configure o certificado digital A1 da empresa e o app sincroniza automaticamente NF-e e CT-e destinadas ao CNPJ, direto da SEFAZ. Ver secao dedicada abaixo.
+- **Remessas para Contabilidade** (login administrativo): selecione NF-e/CT-e sincronizados e ja prontos, monte uma remessa organizada, baixe um pacote `.zip` com os XMLs/PDFs e um resumo em PDF, prepare a mensagem de WhatsApp e o e-mail (sem enviar automaticamente) e acompanhe tudo num historico com status. Ver secao dedicada abaixo.
 
 ## Rodar localmente
 
@@ -79,6 +80,26 @@ Limitacoes reais (nao testadas contra o servico real da SEFAZ, por nao haver com
 
 - Os endpoints/parametros da SEFAZ foram implementados a partir de documentacao publica e podem precisar de ajuste fino contra o manual oficial vigente antes de operar em producao.
 - O teste de conexao e a sincronizacao real dependem de um certificado A1 valido e de rede liberada ate a SEFAZ — teste isso na sua maquina/servidor antes de confiar na integracao.
+
+## Remessas para Contabilidade (envio em lote de NF-e/CT-e)
+
+Fica em **Documentos > Remessas para Contabilidade** (`/documentos`), atras do mesmo login administrativo da tela de certificado. Como funciona:
+
+- **Documentos prontos para envio**: lista todo NF-e/CT-e ja sincronizado da SEFAZ que ainda nao entrou em nenhuma remessa. Selecao multipla (checkbox, "selecionar todos visiveis", "limpar selecao") com um resumo dinamico (total, NF-e, CT-e, periodo, arquivos disponiveis, documentos sem XML/sem PDF).
+- **Revisar remessa**: antes de salvar, mostra nome gerado automaticamente, periodo, responsavel, data/hora, observacao opcional e a lista de conferencia completa (com opcao de remover qualquer documento antes de confirmar). Dai da pra **salvar como rascunho** ou **confirmar a remessa**.
+- Assim que um documento entra numa remessa (rascunho ou confirmada), ele sai da lista de "prontos para envio" e nao pode entrar em outra remessa ativa ao mesmo tempo — a garantia e reforcada no banco (transacao que so vincula documentos que ainda estejam livres).
+- **Pacote .zip**: gera `Remessa_Contabilidade_AAAA-MM-DD/` com pastas `NFE/` e `CTE/` contendo os XMLs e PDFs disponiveis de cada documento, mais um `resumo-remessa.pdf` (nome, periodo, responsavel, lista de documentos e chaves de acesso — nunca fotos, conferencia fisica, divergencias ou inventario, que nem existem neste banco). Se algum documento nao tiver nenhum arquivo (nem XML nem PDF), a geracao e bloqueada e a tela explica qual documento esta incompleto.
+- **PDF do DANFE/DACTE**: o servico de Distribuicao de DF-e da SEFAZ so devolve XML — nao existe PDF nesse fluxo. Por isso o PDF de cada documento e um anexo manual opcional (botao "Anexar PDF" na lista de disponiveis).
+- **WhatsApp**: botao "Preparar mensagem para WhatsApp" monta o texto (segue o modelo com periodo/total/NF-e/CT-e/nome da remessa) e so abre o WhatsApp (`wa.me`) se voce informar um numero — nunca envia sozinho.
+- **E-mail**: botao "Preparar e-mail" monta assunto, corpo e lista de documentos, com um link `mailto:` para abrir no seu aplicativo de e-mail. Deixa claro que o envio automatico ainda nao esta integrado e que o pacote `.zip` precisa ser anexado manualmente (link `mailto:` nao anexa arquivo).
+- **Historico de remessas**: rascunho, pronta para envio, enviada, enviada com pendencias (quando algum documento da remessa nao tinha XML no momento do envio) ou cancelada. "Marcar remessa como enviada" pede confirmacao explicita antes de registrar data/hora/responsavel e trava a remessa. "Cancelar remessa" exige motivo, nunca apaga documentos e devolve os documentos (ainda nao enviados) para a lista de disponiveis.
+- Toda acao fica no mesmo historico de auditoria da tela de certificado (`remessa.criada_rascunho`, `remessa.confirmada`, `remessa.cancelada`, `remessa.marcada_enviada`, `documento.pdf_anexado`, etc.).
+
+Limitacoes reais desta funcionalidade:
+
+- Envio por WhatsApp e e-mail e sempre **preparado, nunca automatico** — por decisao explicita do escopo, nao existe (e nao deve existir) um botao que dispare o envio sozinho.
+- A integracao de envio de e-mail por um provedor (SMTP, SendGrid etc.) nao existe ainda — o botao so monta o conteudo e abre o `mailto:` do seu sistema operacional.
+- PDF do DANFE/DACTE nunca vem automatico da SEFAZ — precisa ser anexado a mao por documento, senao a remessa/pacote fica sem PDF (o XML sozinho ja e aceito, so o `.zip` bloqueia se faltarem os dois arquivos).
 
 ## Sobre a leitura por camera
 

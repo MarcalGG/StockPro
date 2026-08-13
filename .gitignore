@@ -36,6 +36,7 @@ yarn-error.log*
 
 # typescript
 next-env.d.ts
+*.tsbuildinfo
 /dist/
 /.wrangler/
 /.sites-runtime/
@@ -47,6 +48,7 @@ next-env.d.ts
 /prisma/dev.db-journal
 /prisma/*.db
 /scratch-certs/
+/scratch-test/
 
 # cliente Prisma gerado (regenerado a cada install/build via "postinstall")
 /lib/generated/

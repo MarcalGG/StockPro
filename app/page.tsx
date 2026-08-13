@@ -1024,6 +1024,12 @@ export default function Home() {
                 >
                   Configuracoes &gt; Documentos Fiscais
                 </Link>
+                <Link
+                  className="text-xs font-bold text-cyan-200 underline decoration-dotted underline-offset-2 hover:text-cyan-100"
+                  href="/documentos"
+                >
+                  Remessas para Contabilidade
+                </Link>
               </div>
             </section>
           </div>

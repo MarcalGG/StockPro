@@ -307,6 +307,12 @@ export default function ConfiguracoesFiscaisClient({ email }: { email: string })
             <div className="flex flex-col gap-2 sm:flex-row">
               <Link
                 className="rounded-lg border border-white/20 px-4 py-2 text-center text-sm font-bold text-white transition hover:bg-white/10"
+                href="/documentos"
+              >
+                Remessas para contabilidade
+              </Link>
+              <Link
+                className="rounded-lg border border-white/20 px-4 py-2 text-center text-sm font-bold text-white transition hover:bg-white/10"
                 href="/"
               >
                 Voltar ao app

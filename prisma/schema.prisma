@@ -57,6 +57,14 @@ enum SyncStatus {
   ERRO
 }
 
+enum RemessaStatus {
+  RASCUNHO
+  PRONTA
+  ENVIADA
+  ENVIADA_COM_PENDENCIAS
+  CANCELADA
+}
+
 model Company {
   id          String   @id @default(cuid())
   razaoSocial String
@@ -75,6 +83,7 @@ model Company {
   documents   FiscalDocument[]
   syncRuns    SyncRun[]
   auditLogs   AuditLog[]
+  remessas    Remessa[]
 }
 
 model AdminUser {
@@ -137,8 +146,52 @@ model FiscalDocument {
 
   vinculadoRecebimentoId String? // id livre do recebimento no app (o recebimento em si vive no navegador do usuario, nao no banco)
 
+  // PDF do DANFE/DACTE, anexado manualmente pelo administrador. A SEFAZ so
+  // fornece XML pelo servico de Distribuicao de DF-e — nao existe PDF nesse
+  // fluxo, por isso e um upload manual e opcional aqui.
+  pdfBase64     String?
+  pdfUploadedAt DateTime?
+
+  // Uma vez incluido numa remessa (rascunho ou confirmada), o documento fica
+  // vinculado e nao pode entrar em outra remessa ativa ao mesmo tempo.
+  remessaId String?
+  remessa   Remessa? @relation(fields: [remessaId], references: [id])
+
   @@unique([companyId, chaveAcesso])
   @@index([companyId, tipo])
+  @@index([remessaId])
+}
+
+// Remessa de NF-e/CT-e para a contabilidade — agrupa documentos fiscais
+// prontos para envio numa unica remessa, com historico e status proprios.
+// Nunca inclui fotos, conferencias, divergencias ou dados de inventario:
+// esses dados nem existem neste banco (ficam no navegador do usuario).
+model Remessa {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+
+  nome        String
+  status      RemessaStatus @default(RASCUNHO)
+  observacao  String?
+
+  periodoInicio DateTime?
+  periodoFim    DateTime?
+
+  criadoPorEmail String
+  criadoEm       DateTime @default(now())
+
+  confirmadaEm DateTime?
+
+  enviadaEm       DateTime?
+  enviadaPorEmail String?
+
+  canceladaEm     DateTime?
+  motivoCancelamento String?
+
+  documentos FiscalDocument[]
+
+  @@index([companyId, status])
 }
 
 model SyncRun {
