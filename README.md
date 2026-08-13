@@ -4,15 +4,19 @@ App web para recebimento, conferencia e inventario de estoque.
 
 ## O que ja existe
 
+O app abre em branco (sem nota, sem itens, sem contagem de estoque) — os dados de exemplo foram removidos. Tudo e preenchido pelo proprio usuario.
+
 - Navegacao tipo app (barra inferior no celular, abas com icones no desktop), com interface responsiva.
+- Dados da nota (numero, fornecedor, responsavel, data/hora de entrada) editaveis direto no card do cabecalho.
 - Fluxo de foto da nota fiscal em papel (simulado).
 - Fluxo de chave de acesso da NF-e: aceita chave digitada, colada (Ctrl+V ou botao "Colar") ou escaneada, com formatacao automatica em blocos de 4 digitos, validacao dos 44 digitos e extracao de UF, emissao, CNPJ do emissor, modelo, serie e numero da nota.
+- Cadastro manual de itens da nota (codigo, produto, unidade, quantidade) enquanto a importacao automatica nao esta conectada, com opcao de remover.
 - Conferencia de quantidade esperada x recebida, com edicao de lote e validade por item.
 - Marcacao de avaria por item, com observacao da avaria.
 - Status automatico por item: conferido, divergente ou pendente.
 - Resumo automatico de divergencias (unidades em falta, em sobra, itens com avaria, itens sem lote/validade) e campo de observacoes gerais do recebimento.
 - Botao "Finalizar recebimento" (trava a conferencia e registra data/hora) com opcao de reabrir.
-- Tela de inventario.
+- Tela de inventario com cadastro manual de contagens (endereco, produto, quantidade, lotes, status).
 - Relatorio de divergencia completo: dados da nota, responsavel, todos os itens (com lote/validade/avaria) e resumo para aprovacao.
 - Exportacao do relatorio: "Gerar PDF" abre a impressao do navegador (salvar como PDF) e "Exportar Excel" baixa um `.csv` com todos os itens.
 

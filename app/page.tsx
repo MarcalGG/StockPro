@@ -30,66 +30,17 @@ function computeItemStatus(
   return received === expected ? "Conferido" : "Divergente";
 }
 
-const initialItems: InvoiceItem[] = [
-  {
-    id: 1,
-    code: "78911",
-    product: "Hidratante Lily 250ml",
-    unit: "UN",
-    expected: 24,
-    received: 24,
-    batch: "L2408A",
-    validity: "2028-04-30",
-    damaged: false,
-    note: "",
-    status: "Conferido",
-  },
-  {
-    id: 2,
-    code: "78922",
-    product: "Creatina Monohidratada 300g",
-    unit: "UN",
-    expected: 36,
-    received: 34,
-    batch: "CR09B",
-    validity: "2027-11-18",
-    damaged: false,
-    note: "",
-    status: "Divergente",
-  },
-  {
-    id: 3,
-    code: "78933",
-    product: "Shampoo Nutri Repair 400ml",
-    unit: "CX",
-    expected: 12,
-    received: 12,
-    batch: "NR188",
-    validity: "2026-10-12",
-    damaged: true,
-    note: "2 caixas amassadas no transporte.",
-    status: "Divergente",
-  },
-  {
-    id: 4,
-    code: "78944",
-    product: "Whey Protein Baunilha 900g",
-    unit: "UN",
-    expected: 18,
-    received: 0,
-    batch: "",
-    validity: "",
-    damaged: false,
-    note: "",
-    status: "Pendente",
-  },
-];
+const initialItems: InvoiceItem[] = [];
 
-const inventoryRows = [
-  ["Rua A / Palete 04", "Hidratante Lily 250ml", "148 un", "2 lotes", "OK"],
-  ["Rua B / Palete 01", "Creatina Monohidratada 300g", "91 un", "1 lote", "Baixo"],
-  ["Rua C / Palete 07", "Whey Protein Baunilha 900g", "62 un", "3 lotes", "Contar"],
-];
+type InventoryRow = {
+  location: string;
+  product: string;
+  quantity: string;
+  lots: string;
+  status: string;
+};
+
+const initialInventoryRows: InventoryRow[] = [];
 
 const tabs: { id: TabId; label: string; icon: (props: IconProps) => React.ReactElement }[] = [
   { id: "Recebimento", label: "Receber", icon: IconInbox },
@@ -106,11 +57,18 @@ export default function Home() {
   const [scanState, setScanState] = useState<"idle" | "reading" | "done">(
     "idle",
   );
-  const [invoiceKey, setInvoiceKey] = useState(sampleInvoiceKey);
+  const [invoiceKey, setInvoiceKey] = useState("");
   const [pasteError, setPasteError] = useState("");
   const [items, setItems] = useState(initialItems);
+  const [nextItemId, setNextItemId] = useState(1);
   const [receivingNotes, setReceivingNotes] = useState("");
   const [finalizedAt, setFinalizedAt] = useState<string | null>(null);
+  const [invoiceNumber, setInvoiceNumber] = useState("");
+  const [supplier, setSupplier] = useState("");
+  const [responsible, setResponsible] = useState("");
+  const [entryDateTime, setEntryDateTime] = useState("");
+  const [inventoryRows, setInventoryRows] = useState(initialInventoryRows);
+  const [newItem, setNewItem] = useState({ code: "", product: "", unit: "UN", expected: "" });
   const cleanInvoiceKey = invoiceKey.replace(/\D/g, "").slice(0, 44);
   const isInvoiceKeyValid = cleanInvoiceKey.length === 44;
   const invoiceKeyParts = parseInvoiceKey(cleanInvoiceKey);
@@ -223,6 +181,59 @@ export default function Home() {
     );
   }
 
+  function addItem() {
+    if (isFinalized) return;
+    const code = newItem.code.trim();
+    const product = newItem.product.trim();
+    const expected = Number(newItem.expected);
+    if (!product || !Number.isFinite(expected) || expected <= 0) return;
+
+    setItems((current) => [
+      ...current,
+      {
+        id: nextItemId,
+        code: code || String(nextItemId),
+        product,
+        unit: newItem.unit.trim() || "UN",
+        expected,
+        received: 0,
+        batch: "",
+        validity: "",
+        damaged: false,
+        note: "",
+        status: "Pendente",
+      },
+    ]);
+    setNextItemId((current) => current + 1);
+    setNewItem({ code: "", product: "", unit: "UN", expected: "" });
+  }
+
+  function removeItem(id: number) {
+    if (isFinalized) return;
+    setItems((current) => current.filter((item) => item.id !== id));
+  }
+
+  function addInventoryRow() {
+    setInventoryRows((current) => [
+      ...current,
+      { location: "", product: "", quantity: "", lots: "", status: "Contar" },
+    ]);
+  }
+
+  function updateInventoryRow(
+    index: number,
+    field: keyof InventoryRow,
+    value: string,
+  ) {
+    setInventoryRows((current) =>
+      current.map((row, i) => (i === index ? { ...row, [field]: value } : row)),
+    );
+  }
+
+  function removeInventoryRow(index: number) {
+    setInventoryRows((current) => current.filter((_, i) => i !== index));
+  }
+
   function toggleDamaged(id: number) {
     if (isFinalized) return;
     setItems((current) =>
@@ -258,10 +269,10 @@ export default function Home() {
   function exportExcel() {
     const rows: string[][] = [
       ["Relatorio de recebimento - StockScan Pro"],
-      ["Numero da NF", "000.482.119"],
-      ["Fornecedor", "Distribuidora Norte Mix"],
-      ["Responsavel", "Marcal Gomes Neto"],
-      ["Data/hora de entrada", "12/08/2026 as 08:42"],
+      ["Numero da NF", invoiceNumber || "nao informado"],
+      ["Fornecedor", supplier || "nao informado"],
+      ["Responsavel", responsible || "nao informado"],
+      ["Data/hora de entrada", entryDateTime || "nao informada"],
       ["Status", isFinalized ? `Finalizado em ${finalizedAt}` : "Conferencia em andamento"],
       [],
       [
@@ -346,27 +357,56 @@ export default function Home() {
 
             <section className="rounded-xl border border-white/15 bg-white/10 p-4">
               <div className="flex items-start justify-between gap-3">
-                <div>
+                <div className="min-w-0 flex-1">
                   <p className="text-sm text-cyan-100">Recebimento atual</p>
-                  <h2 className="mt-1 text-lg font-semibold sm:text-xl">
-                    NF 000.482.119
-                  </h2>
+                  <input
+                    aria-label="Numero da nota fiscal"
+                    className="mt-1 w-full min-w-0 bg-transparent text-lg font-semibold text-white outline-none placeholder:text-slate-400 sm:text-xl"
+                    disabled={isFinalized}
+                    onChange={(event) => setInvoiceNumber(event.target.value)}
+                    placeholder="Numero da NF (ex.: 000.482.119)"
+                    value={invoiceNumber}
+                  />
                 </div>
                 <span
                   className={`shrink-0 rounded-full px-3 py-1 text-xs font-bold ${
                     isFinalized
                       ? "bg-cyan-300 text-cyan-950"
-                      : "bg-emerald-400 text-emerald-950"
+                      : scanState === "done"
+                        ? "bg-emerald-400 text-emerald-950"
+                        : "bg-white/20 text-white"
                   }`}
                 >
-                  {isFinalized ? "Finalizado" : "OCR 92%"}
+                  {isFinalized
+                    ? "Finalizado"
+                    : scanState === "done"
+                      ? "Leitura OK"
+                      : "Aguardando leitura"}
                 </span>
               </div>
 
               <div className="mt-5 grid gap-3 text-sm text-slate-100">
-                <InfoRow label="Fornecedor" value="Distribuidora Norte Mix" />
-                <InfoRow label="Entrada" value="12/08/2026 as 08:42" />
-                <InfoRow label="Responsavel" value="Marcal Gomes Neto" />
+                <EditableInfoRow
+                  disabled={isFinalized}
+                  label="Fornecedor"
+                  onChange={setSupplier}
+                  placeholder="Nome do fornecedor"
+                  value={supplier}
+                />
+                <EditableInfoRow
+                  disabled={isFinalized}
+                  label="Entrada"
+                  onChange={setEntryDateTime}
+                  placeholder="Data e hora"
+                  value={entryDateTime}
+                />
+                <EditableInfoRow
+                  disabled={isFinalized}
+                  label="Responsavel"
+                  onChange={setResponsible}
+                  placeholder="Quem esta recebendo"
+                  value={responsible}
+                />
                 <InfoRow
                   label="Status"
                   value={
@@ -602,7 +642,11 @@ export default function Home() {
                 <ProcessCard
                   detail="Extrai codigo, descricao, unidade e quantidade."
                   label="Itens importados"
-                  status={scanState === "done" ? "4 encontrados" : "Pendente"}
+                  status={
+                    items.length > 0
+                      ? `${items.length} na lista`
+                      : "Nenhum ainda"
+                  }
                 />
                 <ProcessCard
                   detail="Cria campos para recebido, lote, validade e avarias."
@@ -647,6 +691,73 @@ export default function Home() {
                   Recebimento finalizado em {finalizedAt}. Os campos ficam
                   bloqueados. Use &quot;Reabrir conferencia&quot; para editar
                   de novo.
+                </p>
+              )}
+
+              {!isFinalized && (
+                <div className="mt-5 rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4">
+                  <p className="text-sm font-bold text-slate-700">
+                    Adicionar item da nota
+                  </p>
+                  <p className="mt-1 text-xs leading-5 text-slate-500">
+                    Enquanto a importacao automatica nao esta conectada,
+                    cadastre os produtos manualmente.
+                  </p>
+                  <div className="mt-3 grid gap-2 sm:grid-cols-[0.7fr_1.6fr_0.6fr_0.7fr_auto]">
+                    <input
+                      aria-label="Codigo do produto"
+                      className="rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-cyan-600"
+                      onChange={(event) =>
+                        setNewItem((current) => ({ ...current, code: event.target.value }))
+                      }
+                      placeholder="Codigo"
+                      value={newItem.code}
+                    />
+                    <input
+                      aria-label="Nome do produto"
+                      className="rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-cyan-600"
+                      onChange={(event) =>
+                        setNewItem((current) => ({ ...current, product: event.target.value }))
+                      }
+                      placeholder="Nome do produto"
+                      value={newItem.product}
+                    />
+                    <input
+                      aria-label="Unidade"
+                      className="rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-cyan-600"
+                      onChange={(event) =>
+                        setNewItem((current) => ({ ...current, unit: event.target.value }))
+                      }
+                      placeholder="UN"
+                      value={newItem.unit}
+                    />
+                    <input
+                      aria-label="Quantidade da nota"
+                      className="rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-cyan-600"
+                      min="0"
+                      onChange={(event) =>
+                        setNewItem((current) => ({ ...current, expected: event.target.value }))
+                      }
+                      placeholder="Qtd."
+                      type="number"
+                      value={newItem.expected}
+                    />
+                    <button
+                      className="rounded-lg bg-[#09233f] px-4 py-2 text-sm font-bold text-white transition hover:bg-[#12385f] disabled:cursor-not-allowed disabled:bg-slate-300"
+                      disabled={!newItem.product.trim() || !newItem.expected}
+                      onClick={addItem}
+                      type="button"
+                    >
+                      Adicionar
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {items.length === 0 && (
+                <p className="mt-5 rounded-xl border border-slate-200 bg-slate-50 p-6 text-center text-sm leading-6 text-slate-500">
+                  Nenhum item na conferencia ainda. Use o formulario acima
+                  para adicionar os produtos da nota.
                 </p>
               )}
 
@@ -773,13 +884,23 @@ export default function Home() {
                         value={item.note}
                       />
                     )}
+
+                    {!isFinalized && (
+                      <button
+                        className="mt-3 text-xs font-bold text-rose-600 hover:text-rose-800"
+                        onClick={() => removeItem(item.id)}
+                        type="button"
+                      >
+                        Remover item
+                      </button>
+                    )}
                   </article>
                 ))}
               </div>
 
               {/* Desktop / tablet: table */}
               <div className="mt-5 hidden overflow-x-auto sm:block">
-                <table className="w-full min-w-[1040px] border-separate border-spacing-0 text-left text-sm">
+                <table className="w-full min-w-[1120px] border-separate border-spacing-0 text-left text-sm">
                   <thead>
                     <tr className="bg-slate-100 text-xs uppercase tracking-wide text-slate-600">
                       <Th>Codigo</Th>
@@ -791,6 +912,7 @@ export default function Home() {
                       <Th>Validade</Th>
                       <Th>Avaria</Th>
                       <Th>Status</Th>
+                      <Th>{""}</Th>
                     </tr>
                   </thead>
                   <tbody>
@@ -875,6 +997,17 @@ export default function Home() {
                         <Td>
                           <StatusBadge status={item.status} />
                         </Td>
+                        <Td>
+                          {!isFinalized && (
+                            <button
+                              className="text-xs font-bold text-rose-600 hover:text-rose-800"
+                              onClick={() => removeItem(item.id)}
+                              type="button"
+                            >
+                              Remover
+                            </button>
+                          )}
+                        </Td>
                       </tr>
                     ))}
                   </tbody>
@@ -923,7 +1056,8 @@ export default function Home() {
                   </button>
                 ) : (
                   <button
-                    className="rounded-xl bg-emerald-500 px-5 py-3.5 text-sm font-bold text-emerald-950 shadow-sm transition hover:bg-emerald-400 active:scale-[0.98] sm:py-3"
+                    className="rounded-xl bg-emerald-500 px-5 py-3.5 text-sm font-bold text-emerald-950 shadow-sm transition hover:bg-emerald-400 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500 sm:py-3"
+                    disabled={items.length === 0}
                     onClick={finalizeReceiving}
                     type="button"
                   >
@@ -958,45 +1092,113 @@ export default function Home() {
                 </div>
                 <button
                   className="hidden shrink-0 rounded-xl bg-[#09233f] px-4 py-2 text-sm font-bold text-white transition hover:bg-[#12385f] sm:inline-block"
+                  onClick={addInventoryRow}
                   type="button"
                 >
                   Nova contagem
                 </button>
               </div>
 
+              {inventoryRows.length === 0 && (
+                <p className="mt-5 rounded-xl border border-slate-200 bg-slate-50 p-6 text-center text-sm leading-6 text-slate-500">
+                  Nenhuma contagem registrada ainda. Use &quot;Nova
+                  contagem&quot; para comecar.
+                </p>
+              )}
+
               <div className="mt-5 grid gap-3">
-                {inventoryRows.map(([location, product, quantity, lots, status]) => (
+                {inventoryRows.map((row, index) => (
                   <article
-                    className="grid gap-3 rounded-xl border border-slate-200 p-4 sm:grid-cols-[1fr_1fr_auto]"
-                    key={location}
+                    className="grid gap-3 rounded-xl border border-slate-200 p-4 sm:grid-cols-[1fr_1fr_0.6fr_0.6fr_0.6fr_auto]"
+                    key={index}
                   >
-                    <div>
+                    <label className="block">
                       <p className="text-xs font-bold uppercase tracking-wide text-slate-500">
                         Endereco
                       </p>
-                      <p className="mt-1 font-semibold">{location}</p>
-                    </div>
-                    <div>
+                      <input
+                        aria-label="Endereco"
+                        className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-cyan-600"
+                        onChange={(event) =>
+                          updateInventoryRow(index, "location", event.target.value)
+                        }
+                        placeholder="Rua A / Palete 04"
+                        value={row.location}
+                      />
+                    </label>
+                    <label className="block">
                       <p className="text-xs font-bold uppercase tracking-wide text-slate-500">
                         Produto
                       </p>
-                      <p className="mt-1 font-semibold">{product}</p>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-2 sm:justify-end">
-                      <span className="rounded-lg bg-slate-100 px-3 py-2 text-sm font-bold">
-                        {quantity}
-                      </span>
-                      <span className="rounded-lg bg-cyan-50 px-3 py-2 text-sm font-bold text-cyan-800">
-                        {lots}
-                      </span>
-                      <span className="rounded-lg bg-emerald-50 px-3 py-2 text-sm font-bold text-emerald-800">
-                        {status}
-                      </span>
+                      <input
+                        aria-label="Produto"
+                        className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-cyan-600"
+                        onChange={(event) =>
+                          updateInventoryRow(index, "product", event.target.value)
+                        }
+                        placeholder="Nome do produto"
+                        value={row.product}
+                      />
+                    </label>
+                    <label className="block">
+                      <p className="text-xs font-bold uppercase tracking-wide text-slate-500">
+                        Qtd.
+                      </p>
+                      <input
+                        aria-label="Quantidade"
+                        className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-cyan-600"
+                        onChange={(event) =>
+                          updateInventoryRow(index, "quantity", event.target.value)
+                        }
+                        placeholder="148 un"
+                        value={row.quantity}
+                      />
+                    </label>
+                    <label className="block">
+                      <p className="text-xs font-bold uppercase tracking-wide text-slate-500">
+                        Lotes
+                      </p>
+                      <input
+                        aria-label="Lotes"
+                        className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-cyan-600"
+                        onChange={(event) =>
+                          updateInventoryRow(index, "lots", event.target.value)
+                        }
+                        placeholder="2 lotes"
+                        value={row.lots}
+                      />
+                    </label>
+                    <label className="block">
+                      <p className="text-xs font-bold uppercase tracking-wide text-slate-500">
+                        Status
+                      </p>
+                      <select
+                        aria-label="Status da contagem"
+                        className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-cyan-600"
+                        onChange={(event) =>
+                          updateInventoryRow(index, "status", event.target.value)
+                        }
+                        value={row.status}
+                      >
+                        <option value="OK">OK</option>
+                        <option value="Baixo">Baixo</option>
+                        <option value="Contar">Contar</option>
+                      </select>
+                    </label>
+                    <div className="flex items-end">
+                      <button
+                        className="text-xs font-bold text-rose-600 hover:text-rose-800"
+                        onClick={() => removeInventoryRow(index)}
+                        type="button"
+                      >
+                        Remover
+                      </button>
                     </div>
                   </article>
                 ))}
                 <button
                   className="rounded-xl bg-[#09233f] px-4 py-3 text-sm font-bold text-white transition hover:bg-[#12385f] sm:hidden"
+                  onClick={addInventoryRow}
                   type="button"
                 >
                   Nova contagem
@@ -1056,10 +1258,10 @@ export default function Home() {
               </p>
 
               <div className="mt-5 grid gap-3">
-                <ReportLine label="Numero da NF" value="000.482.119" />
-                <ReportLine label="Fornecedor" value="Distribuidora Norte Mix" />
-                <ReportLine label="Responsavel" value="Marcal Gomes Neto" />
-                <ReportLine label="Data/hora de entrada" value="12/08/2026 as 08:42" />
+                <ReportLine label="Numero da NF" value={invoiceNumber || "nao informado"} />
+                <ReportLine label="Fornecedor" value={supplier || "nao informado"} />
+                <ReportLine label="Responsavel" value={responsible || "nao informado"} />
+                <ReportLine label="Data/hora de entrada" value={entryDateTime || "nao informada"} />
                 <ReportLine label="Itens conferidos" value={`${totals.done}/${items.length}`} />
                 <ReportLine label="Divergencias de quantidade" value={`${totals.divergent}`} />
                 <ReportLine label="Unidades em falta" value={`${totals.missingUnits}`} />
@@ -1111,12 +1313,19 @@ export default function Home() {
             <div className="rounded-2xl bg-white p-4 shadow-sm sm:p-5">
               <h3 className="text-lg font-semibold">Resumo para aprovacao</h3>
               <div className="mt-4 space-y-3">
-                {items.filter((item) => item.status !== "Conferido").length === 0 && (
-                  <p className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-semibold text-emerald-800">
-                    Nenhuma divergencia pendente. Recebimento pronto para
-                    finalizar.
+                {items.length === 0 && (
+                  <p className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm leading-6 text-slate-500">
+                    Nenhum item cadastrado ainda. Adicione os produtos na aba
+                    Conferencia para gerar o resumo.
                   </p>
                 )}
+                {items.length > 0 &&
+                  items.filter((item) => item.status !== "Conferido").length === 0 && (
+                    <p className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-semibold text-emerald-800">
+                      Nenhuma divergencia pendente. Recebimento pronto para
+                      finalizar.
+                    </p>
+                  )}
                 {items
                   .filter((item) => item.status !== "Conferido")
                   .map((item) => (
@@ -1168,6 +1377,11 @@ export default function Home() {
                 Lista completa com lote, validade e avaria, para conferencia e
                 auditoria.
               </p>
+              {items.length === 0 ? (
+                <p className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-6 text-center text-sm leading-6 text-slate-500">
+                  Nenhum item cadastrado ainda.
+                </p>
+              ) : (
               <div className="mt-4 overflow-x-auto">
                 <table className="w-full min-w-[760px] border-separate border-spacing-0 text-left text-sm">
                   <thead>
@@ -1208,6 +1422,7 @@ export default function Home() {
                   </tbody>
                 </table>
               </div>
+              )}
             </div>
           </section>
         )}
@@ -1260,6 +1475,34 @@ function InfoRow({ label, value }: { label: string; value: string }) {
     <div className="flex items-center justify-between gap-4 border-b border-white/10 pb-2 last:border-b-0">
       <span className="text-slate-300">{label}</span>
       <strong className="text-right font-semibold">{value}</strong>
+    </div>
+  );
+}
+
+function EditableInfoRow({
+  disabled,
+  label,
+  onChange,
+  placeholder,
+  value,
+}: {
+  disabled?: boolean;
+  label: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  value: string;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4 border-b border-white/10 pb-2 last:border-b-0">
+      <span className="shrink-0 text-slate-300">{label}</span>
+      <input
+        aria-label={label}
+        className="min-w-0 flex-1 bg-transparent text-right font-semibold text-white outline-none placeholder:text-slate-400"
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        value={value}
+      />
     </div>
   );
 }
