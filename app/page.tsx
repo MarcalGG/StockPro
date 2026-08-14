@@ -1,12 +1,16 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import ConferenceWorkspace, {
+  type ConferenceDocument,
+  type ConferenceStatus,
+} from "./components/ConferenceWorkspace";
 import ReceivingWorkspace, {
   type ReceivingPayload,
 } from "./components/ReceivingWorkspace";
 
-type ItemStatus = "Conferido" | "Divergente" | "Pendente";
+type ItemStatus = ConferenceStatus;
 type ScanMode = "photo" | "key" | "xml";
 type TabId = "Recebimento" | "Conferencia" | "Inventario" | "Relatorio";
 
@@ -27,6 +31,7 @@ type InvoiceItem = {
   shortValidity: boolean;
   missingBatchFlag: boolean;
   status: ItemStatus;
+  manual?: boolean;
 };
 
 function computeItemStatus(item: {
@@ -36,9 +41,13 @@ function computeItemStatus(item: {
   shortageFlag: boolean;
   surplusFlag: boolean;
 }): ItemStatus {
-  if (item.damaged || item.shortageFlag || item.surplusFlag) return "Divergente";
+  if (item.damaged) return "Avaria";
+  if (item.shortageFlag) return "Falta";
+  if (item.surplusFlag) return "Sobra";
   if (item.received === 0) return "Pendente";
-  return item.received === item.expected ? "Conferido" : "Divergente";
+  if (item.received < item.expected) return "Falta";
+  if (item.received > item.expected) return "Sobra";
+  return "Conferido";
 }
 
 function hasShortage(item: InvoiceItem) {
@@ -104,6 +113,9 @@ export default function Home() {
   const [receivingNotes, setReceivingNotes] = useState("");
   const [finalizedAt, setFinalizedAt] = useState<string | null>(null);
   const [invoiceNumber, setInvoiceNumber] = useState("");
+  const [documentType, setDocumentType] = useState("");
+  const [documentSeries, setDocumentSeries] = useState("");
+  const [documentIssueDate, setDocumentIssueDate] = useState("");
   const [supplier, setSupplier] = useState("");
   const [responsible, setResponsible] = useState("");
   const [entryDateTime, setEntryDateTime] = useState("");
@@ -130,6 +142,11 @@ export default function Home() {
     null,
   );
   const [scanLog, setScanLog] = useState<{ text: string; tone: "success" | "error" }[]>([]);
+  const [conferenceMessage, setConferenceMessage] = useState<{
+    tone: "success" | "error" | "info";
+    text: string;
+  } | null>(null);
+  const [highlightedItemId, setHighlightedItemId] = useState<number | null>(null);
   const hasHydrated = useRef(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
@@ -151,9 +168,9 @@ export default function Home() {
     const expected = items.reduce((sum, item) => sum + item.expected, 0);
     const received = items.reduce((sum, item) => sum + item.received, 0);
     const pending = items.filter((item) => item.status === "Pendente").length;
-    const divergent = items.filter((item) => item.status === "Divergente").length;
+    const divergent = items.filter((item) => item.status === "Falta" || item.status === "Sobra" || item.status === "Avaria").length;
     const done = items.filter((item) => item.status === "Conferido").length;
-    const damaged = items.filter((item) => item.damaged).length;
+    const damaged = items.filter((item) => item.status === "Avaria" || item.damaged).length;
     const missingUnits = items.reduce(
       (sum, item) => sum + Math.max(0, item.expected - item.received),
       0,
@@ -201,6 +218,9 @@ export default function Home() {
           setFinalizedAt(saved.finalizedAt);
         }
         if (typeof saved.invoiceNumber === "string") setInvoiceNumber(saved.invoiceNumber);
+        if (typeof saved.documentType === "string") setDocumentType(saved.documentType);
+        if (typeof saved.documentSeries === "string") setDocumentSeries(saved.documentSeries);
+        if (typeof saved.documentIssueDate === "string") setDocumentIssueDate(saved.documentIssueDate);
         if (typeof saved.supplier === "string") setSupplier(saved.supplier);
         if (typeof saved.responsible === "string") setResponsible(saved.responsible);
         if (typeof saved.entryDateTime === "string") setEntryDateTime(saved.entryDateTime);
@@ -222,6 +242,9 @@ export default function Home() {
       receivingNotes,
       finalizedAt,
       invoiceNumber,
+      documentType,
+      documentSeries,
+      documentIssueDate,
       supplier,
       responsible,
       entryDateTime,
@@ -239,6 +262,9 @@ export default function Home() {
     receivingNotes,
     finalizedAt,
     invoiceNumber,
+    documentType,
+    documentSeries,
+    documentIssueDate,
     supplier,
     responsible,
     entryDateTime,
@@ -300,6 +326,34 @@ export default function Home() {
   const barcodeScannerSupported =
     typeof window !== "undefined" && "BarcodeDetector" in window;
 
+  const locateProductByCode = useCallback((rawCode: string): { matched: boolean; itemId?: number; message: string } => {
+    const clean = rawCode.trim();
+    const found = items.find(
+      (item) => (item.barcode && item.barcode === clean) || item.code === clean,
+    );
+    if (!found) {
+      setHighlightedItemId(null);
+      setConferenceMessage({
+        tone: "error",
+        text: "Produto nao localizado nos itens desta nota.",
+      });
+      return {
+        matched: false,
+        message: "Produto nao localizado nos itens desta nota. Tente novamente ou adicione o item manualmente.",
+      };
+    }
+    setHighlightedItemId(found.id);
+    setConferenceMessage({
+      tone: "success",
+      text: `${found.product} localizado. Confirme ou ajuste a quantidade recebida.`,
+    });
+    return {
+      matched: true,
+      itemId: found.id,
+      message: `${found.product} localizado. Confirme ou ajuste a quantidade recebida.`,
+    };
+  }, [items]);
+
   // Le codigo de barras/QR pela camera de verdade (API nativa do navegador,
   // sem biblioteca externa). Funciona em Chrome/Edge no Android e desktop;
   // navegadores sem suporte caem no aviso de fallback (colar/digitar).
@@ -352,11 +406,11 @@ export default function Home() {
                 const isRepeat = last !== null && last.code === raw && now - last.at < 1200;
                 if (!isRepeat) {
                   lastScanRef.current = { code: raw, at: now };
-                  const result = incrementReceivedByCode(raw);
+                  const result = locateProductByCode(raw);
                   pushScanFeedback(
                     result.matched
-                      ? `+1 ${result.productName}`
-                      : `Codigo ${raw} nao encontrado na nota`,
+                      ? result.message
+                      : "Produto nao localizado nos itens desta nota.",
                     result.matched ? "success" : "error",
                   );
                 }
@@ -389,7 +443,7 @@ export default function Home() {
         cameraStreamRef.current = null;
       }
     };
-  }, [scannerTarget, barcodeScannerSupported]);
+  }, [scannerTarget, barcodeScannerSupported, locateProductByCode]);
 
   function openKeyScanner() {
     if (!barcodeScannerSupported) {
@@ -444,29 +498,6 @@ export default function Home() {
     setScanLog((current) => [{ text, tone }, ...current].slice(0, 6));
     if (scanFeedbackTimeoutRef.current) window.clearTimeout(scanFeedbackTimeoutRef.current);
     scanFeedbackTimeoutRef.current = window.setTimeout(() => setScanFeedback(null), 1800);
-  }
-
-  function incrementReceivedByCode(rawCode: string): { matched: boolean; productName: string } {
-    let matchedName = "";
-    setItems((current) => {
-      const idx = current.findIndex(
-        (item) => (item.barcode && item.barcode === rawCode) || item.code === rawCode,
-      );
-      if (idx === -1) return current;
-      matchedName = current[idx].product;
-      return current.map((item, i) => {
-        if (i !== idx) return item;
-        const nextReceived = item.received + 1;
-        const next = {
-          ...item,
-          received: nextReceived,
-          shortageFlag: nextReceived >= item.expected ? false : item.shortageFlag,
-          surplusFlag: nextReceived <= item.expected ? false : item.surplusFlag,
-        };
-        return { ...next, status: computeItemStatus(next) };
-      });
-    });
-    return { matched: matchedName !== "", productName: matchedName };
   }
 
   function handleNotePhotoChange(event: React.ChangeEvent<HTMLInputElement>) {
@@ -539,6 +570,12 @@ export default function Home() {
     setItems(importedItems);
     setNextItemId((current) => current + importedItems.length);
     if (xmlPreview.invoiceNumber) setInvoiceNumber(xmlPreview.invoiceNumber);
+    if (xmlPreview.accessKey) {
+      const parts = parseInvoiceKey(xmlPreview.accessKey);
+      setDocumentType(parts.model === "57" ? "CT-e" : "NF-e");
+      setDocumentSeries(parts.series === "Aguardando" ? "" : parts.series);
+      setDocumentIssueDate(xmlPreview.entryDateTime || parts.issue);
+    }
     if (xmlPreview.supplier) setSupplier(xmlPreview.supplier);
     if (xmlPreview.entryDateTime) setEntryDateTime(xmlPreview.entryDateTime);
     if (xmlPreview.accessKey) setInvoiceKey(xmlPreview.accessKey);
@@ -564,6 +601,9 @@ export default function Home() {
     setReceivingNotes("");
     setFinalizedAt(null);
     setInvoiceNumber("");
+    setDocumentType("");
+    setDocumentSeries("");
+    setDocumentIssueDate("");
     setSupplier("");
     setResponsible("");
     setEntryDateTime("");
@@ -597,6 +637,9 @@ export default function Home() {
         if (raw.length !== 9) return current;
         return `${raw.slice(0, 3)}.${raw.slice(3, 6)}.${raw.slice(6, 9)}`;
       });
+      setDocumentType(invoiceKeyParts.model === "57" ? "CT-e" : "NF-e");
+      setDocumentSeries(invoiceKeyParts.series === "Aguardando" ? "" : invoiceKeyParts.series);
+      setDocumentIssueDate(invoiceKeyParts.issue === "Aguardando" ? "" : invoiceKeyParts.issue);
       setActiveTab("Conferencia");
     }, 700);
   }
@@ -635,7 +678,8 @@ export default function Home() {
           shortageFlag: nextReceived >= item.expected ? false : item.shortageFlag,
           surplusFlag: nextReceived <= item.expected ? false : item.surplusFlag,
         };
-        return { ...next, status: computeItemStatus(next) };
+        const status = nextReceived < item.expected ? "Falta" : computeItemStatus(next);
+        return { ...next, status };
       }),
     );
   }
@@ -678,6 +722,7 @@ export default function Home() {
         shortValidity: false,
         missingBatchFlag: false,
         status: "Pendente",
+        manual: true,
       },
     ]);
     setNextItemId((current) => current + 1);
@@ -770,6 +815,26 @@ export default function Home() {
   }
 
   function finalizeReceiving() {
+    const pending = items.filter((item) => item.status === "Pendente").length;
+    if (pending > 0) {
+      const proceed = window.confirm("Existem itens ainda pendentes. Deseja finalizar mesmo assim?");
+      if (!proceed) return;
+    }
+
+    const summary = [
+      "Resumo da conferencia:",
+      `Itens totais: ${items.length}`,
+      `Conferidos: ${items.filter((item) => item.status === "Conferido").length}`,
+      `Faltas: ${items.filter((item) => item.status === "Falta").length}`,
+      `Sobras: ${items.filter((item) => item.status === "Sobra").length}`,
+      `Avarias: ${items.filter((item) => item.status === "Avaria").length}`,
+      `Responsavel: ${responsible || "nao informado"}`,
+      `Data/hora: ${new Date().toLocaleString("pt-BR")}`,
+      "",
+      "Confirmar finalizacao?",
+    ].join("\n");
+    if (!window.confirm(summary)) return;
+
     setFinalizedAt(
       new Date().toLocaleString("pt-BR", {
         day: "2-digit",
@@ -779,10 +844,17 @@ export default function Home() {
         minute: "2-digit",
       }),
     );
+    setConferenceMessage({ tone: "success", text: "Conferencia finalizada. O recebimento ficou bloqueado para edicao direta." });
   }
 
   function reopenReceiving() {
     setFinalizedAt(null);
+    setConferenceMessage({ tone: "info", text: "Conferencia reaberta para edicao." });
+  }
+
+  function saveConferenceDraft() {
+    setFinalizedAt(null);
+    setConferenceMessage({ tone: "success", text: "Conferencia salva como rascunho." });
   }
 
   function generatePdf() {
@@ -917,7 +989,67 @@ export default function Home() {
     window.setTimeout(() => setCopyFeedback(""), 3000);
   }
 
+  function addManualConferenceItem(item: {
+    code: string;
+    product: string;
+    unit: string;
+    expected: string;
+    received: string;
+    note: string;
+  }) {
+    if (isFinalized) return;
+    const product = item.product.trim();
+    if (!product) {
+      setConferenceMessage({ tone: "error", text: "Informe o produto para adicionar o item manual." });
+      return;
+    }
+
+    const expected = Math.max(0, Number(item.expected || "0"));
+    const received = Math.max(0, Number(item.received || "0"));
+    if (!Number.isFinite(expected) || !Number.isFinite(received)) {
+      setConferenceMessage({ tone: "error", text: "Informe quantidades validas para o item manual." });
+      return;
+    }
+
+    const nextItem = {
+      id: nextItemId,
+      code: item.code.trim() || String(nextItemId),
+      barcode: item.code.trim(),
+      product,
+      unit: item.unit.trim() || "UN",
+      expected,
+      received,
+      batch: "",
+      validity: "",
+      damaged: false,
+      note: item.note.trim(),
+      shortageFlag: false,
+      surplusFlag: false,
+      shortValidity: false,
+      missingBatchFlag: false,
+      status: "Pendente" as ItemStatus,
+      manual: true,
+    };
+    const status = computeItemStatus(nextItem);
+    setItems((current) => [...current, { ...nextItem, status }]);
+    setNextItemId((current) => current + 1);
+    setConferenceMessage({ tone: "success", text: "Item manual adicionado a conferencia." });
+  }
+
+  function registerDamage(id: number, note: string) {
+    if (isFinalized) return;
+    setItems((current) =>
+      current.map((item) =>
+        item.id === id
+          ? { ...item, damaged: true, note, status: "Avaria" }
+          : item,
+      ),
+    );
+    setConferenceMessage({ tone: "info", text: "Avaria registrada. Inclua uma observacao se necessario." });
+  }
+
   function startReceivingConference(payload: ReceivingPayload) {
+    const parts = payload.accessKey ? parseInvoiceKey(payload.accessKey) : null;
     const importedItems: InvoiceItem[] = payload.items.map((item, index) => ({
       id: nextItemId + index,
       code: item.code || String(nextItemId + index),
@@ -935,10 +1067,14 @@ export default function Home() {
       shortValidity: false,
       missingBatchFlag: false,
       status: "Pendente",
+      manual: false,
     }));
 
     setInvoiceKey(payload.accessKey);
     setInvoiceNumber(payload.invoiceNumber);
+    setDocumentType(payload.documentType || (parts?.model === "57" ? "CT-e" : parts?.model === "55" ? "NF-e" : ""));
+    setDocumentSeries(payload.series || (parts?.series === "Aguardando" ? "" : parts?.series ?? ""));
+    setDocumentIssueDate(payload.issueDate || payload.entryDateTime || (parts?.issue === "Aguardando" ? "" : parts?.issue ?? ""));
     setSupplier(payload.supplier);
     setResponsible(payload.responsible);
     setEntryDateTime(payload.entryDateTime);
@@ -947,6 +1083,7 @@ export default function Home() {
     setNextItemId((current) => current + importedItems.length);
     setNotePhotoUrl(payload.attachmentUrl);
     setFinalizedAt(null);
+    setConferenceMessage(null);
     setScanState("done");
     setActiveTab("Conferencia");
   }
@@ -957,6 +1094,96 @@ export default function Home() {
         onNavigate={setActiveTab}
         onStart={startReceivingConference}
       />
+    );
+  }
+
+  if (activeTab === "Conferencia") {
+    const hasActiveReceiving = Boolean(
+      scanState === "done" ||
+        invoiceKey ||
+        invoiceNumber ||
+        supplier ||
+        responsible ||
+        entryDateTime ||
+        items.length > 0,
+    );
+    const conferenceDocument: ConferenceDocument = {
+      type: documentType || (invoiceKeyParts.model === "57" ? "CT-e" : invoiceKeyParts.model === "55" ? "NF-e" : ""),
+      number: invoiceNumber,
+      series: documentSeries || (invoiceKeyParts.series === "Aguardando" ? "" : invoiceKeyParts.series),
+      supplier,
+      issueDate: documentIssueDate,
+      responsible,
+      accessKey: invoiceKey,
+      entryDateTime,
+      notes: receivingNotes,
+      finalizedAt,
+      hasActiveReceiving,
+    };
+
+    return (
+      <>
+        <ConferenceWorkspace
+          document={conferenceDocument}
+          highlightedItemId={highlightedItemId}
+          items={items}
+          message={conferenceMessage}
+          onAddManualItem={addManualConferenceItem}
+          onConfirmItem={markReceivedAll}
+          onFinalize={finalizeReceiving}
+          onNavigate={setActiveTab}
+          onOpenScanner={openConferenceScanner}
+          onReopen={reopenReceiving}
+          onRegisterDamage={registerDamage}
+          onSaveDraft={saveConferenceDraft}
+          onScanProduct={locateProductByCode}
+          onUpdateNote={(id, value) => updateField(id, "note", value)}
+          onUpdateReceived={updateReceived}
+        />
+
+        {scannerTarget === "conferenceLoop" && (
+          <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/80 p-4">
+            <div className="w-full max-w-lg rounded-2xl bg-white p-4 shadow-2xl">
+              <video
+                className="aspect-video w-full rounded-xl bg-black object-cover"
+                muted
+                playsInline
+                ref={videoRef}
+              />
+              <p className="mt-3 text-sm text-slate-600">
+                Aponte para o codigo de barras do produto.
+              </p>
+              {scanFeedback && (
+                <p
+                  className={`mt-3 rounded-lg p-3 text-sm font-bold ${
+                    scanFeedback.tone === "success"
+                      ? "bg-emerald-50 text-emerald-800"
+                      : "bg-rose-50 text-rose-800"
+                  }`}
+                >
+                  {scanFeedback.text}
+                </p>
+              )}
+              {scanLog.length > 0 && (
+                <div className="mt-3 max-h-32 overflow-y-auto rounded-lg bg-slate-50 p-3 text-xs">
+                  {scanLog.map((entry, index) => (
+                    <p className={entry.tone === "success" ? "text-emerald-700" : "text-rose-700"} key={`${entry.text}-${index}`}>
+                      {entry.text}
+                    </p>
+                  ))}
+                </div>
+              )}
+              <button
+                className="mt-3 w-full rounded-xl border px-4 py-3 font-bold"
+                onClick={() => setScannerTarget(null)}
+                type="button"
+              >
+                Concluir
+              </button>
+            </div>
+          </div>
+        )}
+      </>
     );
   }
 
@@ -1509,7 +1736,7 @@ export default function Home() {
           </section>
         )}
 
-        {activeTab === "Conferencia" && (
+        {false && (
           <section className="grid min-w-0 gap-4 sm:gap-5">
             <div className="min-w-0 rounded-2xl bg-white p-4 shadow-sm sm:p-5">
               <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-end">
@@ -2775,9 +3002,11 @@ function Td({ children }: { children: React.ReactNode }) {
 
 function StatusBadge({ status }: { status: ItemStatus }) {
   const colors = {
+    Avaria: "bg-amber-50 text-amber-800 ring-amber-200",
     Conferido: "bg-emerald-50 text-emerald-800 ring-emerald-200",
-    Divergente: "bg-amber-50 text-amber-800 ring-amber-200",
-    Pendente: "bg-rose-50 text-rose-800 ring-rose-200",
+    Falta: "bg-rose-50 text-rose-800 ring-rose-200",
+    Pendente: "bg-slate-100 text-slate-700 ring-slate-200",
+    Sobra: "bg-orange-50 text-orange-800 ring-orange-200",
   };
 
   return (

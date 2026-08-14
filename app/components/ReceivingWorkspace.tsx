@@ -15,8 +15,11 @@ export type ReceivingItem = {
 };
 
 export type ReceivingPayload = {
+  documentType: "NF-e" | "CT-e" | "";
   accessKey: string;
   invoiceNumber: string;
+  series: string;
+  issueDate: string;
   supplier: string;
   responsible: string;
   entryDateTime: string;
@@ -209,7 +212,7 @@ export default function ReceivingWorkspace({ onNavigate, onStart }: Props) {
     if (duplicate && !window.confirm("Já existe um recebimento com este documento. Deseja abrir o recebimento existente?\n\nOK abre a Conferência; Cancelar mantém esta tela.")) return;
     rememberDocument(document.accessKey, xmlFingerprint, effectiveNumber, effectiveSupplier, effectiveDate);
     setStatus("Em conferência");
-    onStart({ accessKey: document.accessKey, invoiceNumber: effectiveNumber, supplier: effectiveSupplier, responsible, entryDateTime: effectiveDate, notes, attachmentUrl: attachment?.url ?? null, items: document.items });
+    onStart({ documentType: document.type, accessKey: document.accessKey, invoiceNumber: effectiveNumber, series: document.series, issueDate: document.issue, supplier: effectiveSupplier, responsible, entryDateTime: effectiveDate, notes, attachmentUrl: attachment?.url ?? null, items: document.items });
   }
 
   return (
