@@ -9,6 +9,17 @@ import ConferenceWorkspace, {
 import ReceivingWorkspace, {
   type ReceivingPayload,
 } from "./components/ReceivingWorkspace";
+import {
+  clearCurrentReceivingDraft,
+  createOperationalId,
+  getCurrentReceivingDraft,
+  saveCurrentReceivingDraft,
+  saveReceivingRecord,
+  type CurrentReceivingDraft,
+  type StoredConferenceItem,
+  type StoredDivergence,
+  type StoredReceivingRecord,
+} from "../lib/localOperationalStore";
 
 type ItemStatus = ConferenceStatus;
 type ScanMode = "photo" | "key" | "xml";
@@ -83,8 +94,6 @@ const tabs: { id: TabId; label: string; icon: (props: IconProps) => React.ReactE
   { id: "Relatorio", label: "Relatorio", icon: IconDoc },
 ];
 
-const STORAGE_KEY = "stockscan-pro:recebimento-atual";
-
 type FiscalLookupResult = {
   status:
     | "LOCALIZADO"
@@ -119,12 +128,7 @@ export default function Home() {
   const [supplier, setSupplier] = useState("");
   const [responsible, setResponsible] = useState("");
   const [entryDateTime, setEntryDateTime] = useState("");
-  // Id local (nao e um id de banco) usado so para vincular um documento
-  // fiscal sincronizado a "este" recebimento no navegador. Gerado uma vez e
-  // mantido no localStorage junto com o resto do recebimento.
-  const [recebimentoId] = useState(() =>
-    typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
-  );
+  const [recebimentoId, setRecebimentoId] = useState(() => createOperationalId("recebimento"));
   const [fiscalLookup, setFiscalLookup] = useState<FiscalLookupResult | null>(null);
   const [fiscalLookupLoading, setFiscalLookupLoading] = useState(false);
   const [inventoryRows, setInventoryRows] = useState<InventoryRow[]>(initialInventoryRows);
@@ -200,44 +204,49 @@ export default function Home() {
     };
   }, [items]);
 
-  // Fase 5: restaura o recebimento em andamento salvo no navegador.
-  // Precisa ser um efeito (nao um initializer de useState) porque `window.localStorage`
-  // so existe no cliente; ler no render quebraria a renderizacao no servidor. Roda uma
-  // unica vez ao montar (dependencias vazias), entao nao gera loop de renders.
-  useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const saved = JSON.parse(raw);
-        // eslint-disable-next-line react-hooks/set-state-in-effect -- restauracao unica na montagem, guardada por [] e por hasHydrated
-        if (typeof saved.invoiceKey === "string") setInvoiceKey(saved.invoiceKey);
-        if (Array.isArray(saved.items)) setItems(saved.items);
-        if (typeof saved.nextItemId === "number") setNextItemId(saved.nextItemId);
-        if (typeof saved.receivingNotes === "string") setReceivingNotes(saved.receivingNotes);
-        if (saved.finalizedAt === null || typeof saved.finalizedAt === "string") {
-          setFinalizedAt(saved.finalizedAt);
-        }
-        if (typeof saved.invoiceNumber === "string") setInvoiceNumber(saved.invoiceNumber);
-        if (typeof saved.documentType === "string") setDocumentType(saved.documentType);
-        if (typeof saved.documentSeries === "string") setDocumentSeries(saved.documentSeries);
-        if (typeof saved.documentIssueDate === "string") setDocumentIssueDate(saved.documentIssueDate);
-        if (typeof saved.supplier === "string") setSupplier(saved.supplier);
-        if (typeof saved.responsible === "string") setResponsible(saved.responsible);
-        if (typeof saved.entryDateTime === "string") setEntryDateTime(saved.entryDateTime);
-        if (Array.isArray(saved.inventoryRows)) setInventoryRows(saved.inventoryRows);
-      }
-    } catch {
-      // dados salvos corrompidos: ignora e comeca do zero
-    }
-    hasHydrated.current = true;
-  }, []);
+  const serializeConferenceItems = useCallback((): StoredConferenceItem[] => {
+    return items.map((item) => ({
+      id: item.id,
+      code: item.code,
+      barcode: item.barcode,
+      product: item.product,
+      unit: item.unit,
+      expected: item.expected,
+      received: item.received,
+      batch: item.batch,
+      validity: item.validity,
+      damaged: item.damaged,
+      note: item.note,
+      shortageFlag: item.shortageFlag,
+      surplusFlag: item.surplusFlag,
+      shortValidity: item.shortValidity,
+      missingBatchFlag: item.missingBatchFlag,
+      status: item.status,
+      manual: item.manual,
+    }));
+  }, [items]);
 
-  // Fase 5: salva automaticamente a cada mudanca relevante.
-  useEffect(() => {
-    if (!hasHydrated.current) return;
-    const payload = {
+  function buildDivergences(): StoredDivergence[] {
+    return items
+      .filter((item) => item.status === "Falta" || item.status === "Sobra" || item.status === "Avaria")
+      .map((item) => ({
+        itemId: item.id,
+        code: item.code,
+        product: item.product,
+        unit: item.unit,
+        expected: item.expected,
+        received: item.received,
+        difference: item.received - item.expected,
+        status: item.status,
+        note: item.note,
+      }));
+  }
+
+  function buildCurrentReceivingDraft(): CurrentReceivingDraft {
+    return {
+      receiptId: recebimentoId,
       invoiceKey,
-      items,
+      items: serializeConferenceItems(),
       nextItemId,
       receivingNotes,
       finalizedAt,
@@ -250,14 +259,80 @@ export default function Home() {
       entryDateTime,
       inventoryRows,
     };
-    try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-    } catch {
-      // armazenamento indisponivel ou cheio: ignora
+  }
+
+  function buildReceivingRecord(
+    status: StoredReceivingRecord["status"],
+    finalizedDate: string | null,
+  ): StoredReceivingRecord {
+    const now = new Date().toISOString();
+    return {
+      id: recebimentoId,
+      status,
+      documentType,
+      invoiceNumber,
+      documentSeries,
+      documentIssueDate,
+      supplier,
+      responsible,
+      entryDateTime,
+      accessKey: invoiceKey,
+      notes: receivingNotes,
+      items: serializeConferenceItems(),
+      divergences: buildDivergences(),
+      createdAt: now,
+      updatedAt: now,
+      finalizedAt: finalizedDate,
+    };
+  }
+
+  useEffect(() => {
+    const saved = getCurrentReceivingDraft();
+    if (saved) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- restauracao unica na montagem, guardada por [] e por hasHydrated
+      setRecebimentoId(saved.receiptId || createOperationalId("recebimento"));
+      if (typeof saved.invoiceKey === "string") setInvoiceKey(saved.invoiceKey);
+      if (Array.isArray(saved.items)) setItems(saved.items);
+      if (typeof saved.nextItemId === "number") setNextItemId(saved.nextItemId);
+      if (typeof saved.receivingNotes === "string") setReceivingNotes(saved.receivingNotes);
+      if (saved.finalizedAt === null || typeof saved.finalizedAt === "string") {
+        setFinalizedAt(saved.finalizedAt);
+      }
+      if (typeof saved.invoiceNumber === "string") setInvoiceNumber(saved.invoiceNumber);
+      if (typeof saved.documentType === "string") setDocumentType(saved.documentType);
+      if (typeof saved.documentSeries === "string") setDocumentSeries(saved.documentSeries);
+      if (typeof saved.documentIssueDate === "string") setDocumentIssueDate(saved.documentIssueDate);
+      if (typeof saved.supplier === "string") setSupplier(saved.supplier);
+      if (typeof saved.responsible === "string") setResponsible(saved.responsible);
+      if (typeof saved.entryDateTime === "string") setEntryDateTime(saved.entryDateTime);
+      if (Array.isArray(saved.inventoryRows)) setInventoryRows(saved.inventoryRows);
     }
+    hasHydrated.current = true;
+  }, []);
+
+  useEffect(() => {
+    if (!hasHydrated.current) return;
+    saveCurrentReceivingDraft({
+      receiptId: recebimentoId,
+      invoiceKey,
+      items: serializeConferenceItems(),
+      nextItemId,
+      receivingNotes,
+      finalizedAt,
+      invoiceNumber,
+      documentType,
+      documentSeries,
+      documentIssueDate,
+      supplier,
+      responsible,
+      entryDateTime,
+      inventoryRows,
+    });
   }, [
+    recebimentoId,
     invoiceKey,
     items,
+    serializeConferenceItems,
     nextItemId,
     receivingNotes,
     finalizedAt,
@@ -594,6 +669,7 @@ export default function Home() {
     );
     if (!confirmed) return;
 
+    setRecebimentoId(createOperationalId("recebimento"));
     setInvoiceKey("");
     setPasteError("");
     setItems([]);
@@ -618,11 +694,7 @@ export default function Home() {
     });
     setXmlPreview(null);
     setXmlImportError("");
-    try {
-      window.localStorage.removeItem(STORAGE_KEY);
-    } catch {
-      // ignora
-    }
+    clearCurrentReceivingDraft();
   }
 
   function useKeyAndImportItems() {
@@ -835,15 +907,15 @@ export default function Home() {
     ].join("\n");
     if (!window.confirm(summary)) return;
 
-    setFinalizedAt(
-      new Date().toLocaleString("pt-BR", {
-        day: "2-digit",
-        month: "2-digit",
-        year: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-      }),
-    );
+    const finalizedDate = new Date().toLocaleString("pt-BR", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    setFinalizedAt(finalizedDate);
+    saveReceivingRecord(buildReceivingRecord("Conferencia finalizada", finalizedDate));
     setConferenceMessage({ tone: "success", text: "Conferencia finalizada. O recebimento ficou bloqueado para edicao direta." });
   }
 
@@ -854,6 +926,8 @@ export default function Home() {
 
   function saveConferenceDraft() {
     setFinalizedAt(null);
+    saveCurrentReceivingDraft({ ...buildCurrentReceivingDraft(), finalizedAt: null });
+    saveReceivingRecord(buildReceivingRecord("Em andamento", null));
     setConferenceMessage({ tone: "success", text: "Conferencia salva como rascunho." });
   }
 
@@ -1049,6 +1123,7 @@ export default function Home() {
   }
 
   function startReceivingConference(payload: ReceivingPayload) {
+    setRecebimentoId(createOperationalId("recebimento"));
     const parts = payload.accessKey ? parseInvoiceKey(payload.accessKey) : null;
     const importedItems: InvoiceItem[] = payload.items.map((item, index) => ({
       id: nextItemId + index,
