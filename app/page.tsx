@@ -2,6 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import ReceivingWorkspace, {
+  type ReceivingPayload,
+} from "./components/ReceivingWorkspace";
 
 type ItemStatus = "Conferido" | "Divergente" | "Pendente";
 type ScanMode = "photo" | "key" | "xml";
@@ -914,6 +917,49 @@ export default function Home() {
     window.setTimeout(() => setCopyFeedback(""), 3000);
   }
 
+  function startReceivingConference(payload: ReceivingPayload) {
+    const importedItems: InvoiceItem[] = payload.items.map((item, index) => ({
+      id: nextItemId + index,
+      code: item.code || String(nextItemId + index),
+      barcode: item.barcode,
+      product: item.product,
+      unit: item.unit,
+      expected: item.expected,
+      received: 0,
+      batch: item.batch,
+      validity: item.validity,
+      damaged: false,
+      note: "",
+      shortageFlag: false,
+      surplusFlag: false,
+      shortValidity: false,
+      missingBatchFlag: false,
+      status: "Pendente",
+    }));
+
+    setInvoiceKey(payload.accessKey);
+    setInvoiceNumber(payload.invoiceNumber);
+    setSupplier(payload.supplier);
+    setResponsible(payload.responsible);
+    setEntryDateTime(payload.entryDateTime);
+    setReceivingNotes(payload.notes);
+    setItems(importedItems);
+    setNextItemId((current) => current + importedItems.length);
+    setNotePhotoUrl(payload.attachmentUrl);
+    setFinalizedAt(null);
+    setScanState("done");
+    setActiveTab("Conferencia");
+  }
+
+  if (activeTab === "Recebimento") {
+    return (
+      <ReceivingWorkspace
+        onNavigate={setActiveTab}
+        onStart={startReceivingConference}
+      />
+    );
+  }
+
   return (
     <main className="min-h-screen bg-[#eef3f8] text-slate-950">
       <div className="mx-auto flex min-w-0 max-w-7xl flex-col gap-4 px-3 py-3 pb-24 sm:gap-5 sm:px-6 sm:py-4 sm:pb-6 lg:px-8">
@@ -1056,7 +1102,7 @@ export default function Home() {
           ))}
         </nav>
 
-        {activeTab === "Recebimento" && (
+        {xmlPreview && (
           <section className="grid gap-4 sm:gap-5 lg:grid-cols-[0.85fr_1.15fr]">
             <div className="rounded-2xl bg-white p-4 shadow-sm sm:p-5">
               <div className="flex items-start justify-between gap-4">

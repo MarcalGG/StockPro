@@ -43,6 +43,72 @@ select:focus-visible {
   outline-offset: 2px;
 }
 
+.receiving-shell {
+  display: grid;
+  grid-template-columns: 244px minmax(0, 1fr);
+}
+
+.receiving-sidebar {
+  position: sticky;
+  top: 0;
+  display: flex;
+  height: 100vh;
+  flex-direction: column;
+  background: #081f3b;
+  padding: 1.5rem 1rem;
+  color: white;
+}
+
+.sidebar-link {
+  width: 100%;
+  border-radius: 0.75rem;
+  padding: 0.8rem 0.9rem;
+  text-align: left;
+  color: #bfdbfe;
+  transition: background 160ms ease, color 160ms ease;
+}
+
+.sidebar-link:hover {
+  background: rgb(255 255 255 / 0.08);
+  color: white;
+}
+
+.sidebar-link-active {
+  background: #1d4ed8;
+  color: white;
+  font-weight: 700;
+}
+
+@media (max-width: 767px) {
+  .receiving-shell {
+    display: block;
+    padding-bottom: 76px;
+  }
+
+  .receiving-sidebar {
+    position: fixed;
+    z-index: 40;
+    inset: auto 0 0;
+    height: auto;
+    flex-direction: row;
+    gap: 0.25rem;
+    overflow-x: auto;
+    padding: 0.55rem max(0.55rem, env(safe-area-inset-right)) calc(0.55rem + env(safe-area-inset-bottom)) max(0.55rem, env(safe-area-inset-left));
+  }
+
+  .receiving-sidebar > div,
+  .receiving-sidebar .sidebar-link:last-child {
+    display: none;
+  }
+
+  .sidebar-link {
+    min-width: max-content;
+    padding: 0.7rem 0.8rem;
+    text-align: center;
+    font-size: 0.75rem;
+  }
+}
+
 /* Safe-area padding for mobile devices with a home indicator */
 .pb-safe {
   padding-bottom: calc(0.75rem + env(safe-area-inset-bottom));
