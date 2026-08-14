@@ -4,12 +4,16 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import {
   canMarkFiscalDocumentReady,
+  findDocumentAccountingShipmentBlock,
   getReceivingRecord,
   listAccountingShipmentDrafts,
+  listDocumentsAvailableForAccountingShipment,
   listFiscalDocuments,
   saveAccountingShipmentDraft,
+  updateAccountingShipmentStatus,
   updateFiscalDocumentStatus,
   type AccountingShipmentDraft,
+  type AccountingShipmentStatus,
   type FiscalDocumentRecord,
   type FiscalDocumentStatus,
   type FiscalDocumentType,
@@ -19,6 +23,10 @@ import {
 type PeriodFilter = "all" | "today" | "7" | "30";
 type TypeFilter = "Todos" | FiscalDocumentType;
 type StatusFilter = "Todos" | FiscalDocumentStatus;
+type Message = { tone: "success" | "error" | "info"; text: string };
+type ShipmentForm = { name: string; period: string; responsible: string; notes: string };
+
+const emptyForm: ShipmentForm = { name: "", period: "", responsible: "", notes: "" };
 
 const statusOptions: StatusFilter[] = [
   "Todos",
@@ -41,9 +49,10 @@ export default function AccountingDocumentsWorkspace() {
   const [detail, setDetail] = useState<FiscalDocumentRecord | null>(null);
   const [showLinkedReceiving, setShowLinkedReceiving] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
-  const [shipmentResponsible, setShipmentResponsible] = useState("");
-  const [shipmentNotes, setShipmentNotes] = useState("");
-  const [message, setMessage] = useState<{ tone: "success" | "error" | "info"; text: string } | null>(null);
+  const [activeShipment, setActiveShipment] = useState<AccountingShipmentDraft | null>(null);
+  const [shipmentForm, setShipmentForm] = useState<ShipmentForm>(emptyForm);
+  const [message, setMessage] = useState<Message | null>(null);
+  const [copyFeedback, setCopyFeedback] = useState("");
 
   function refresh() {
     setDocuments(listFiscalDocuments());
@@ -86,6 +95,13 @@ export default function AccountingDocumentsWorkspace() {
     [documents, selectedIds],
   );
 
+  const modalDocuments = useMemo(() => {
+    if (activeShipment) {
+      return documents.filter((document) => activeShipment.documentIds.includes(document.id));
+    }
+    return selectedDocuments;
+  }, [activeShipment, documents, selectedDocuments]);
+
   const metrics = useMemo(() => {
     const pendingStatuses: FiscalDocumentStatus[] = ["Pendente", "Incompleto", "Duplicado"];
     return {
@@ -96,10 +112,47 @@ export default function AccountingDocumentsWorkspace() {
     };
   }, [documents]);
 
+  const shipmentSummary = useMemo(() => buildShipmentSummary(modalDocuments), [modalDocuments]);
+
+  const validation = useMemo(() => {
+    const blocks = listDocumentsAvailableForAccountingShipment(
+      modalDocuments.map((document) => document.id),
+      activeShipment?.id,
+    );
+    const blockedByDocument = new Map(blocks.map((item) => [item.documentId, item.shipment]));
+    const invalid = modalDocuments
+      .map((document) => {
+        const check = canMarkFiscalDocumentReady(document);
+        const block = blockedByDocument.get(document.id);
+        const reasons = [...check.missing];
+        if (block) reasons.push(`em outra remessa (${block.name})`);
+        return { document, reasons };
+      })
+      .filter((item) => item.reasons.length > 0);
+    return {
+      invalid,
+      validCount: modalDocuments.length - invalid.length,
+      filesAvailable: modalDocuments.filter((document) => document.hasXml || document.hasPdf).length,
+      withoutPdfButWithXml: modalDocuments.filter((document) => document.hasXml && !document.hasPdf).length,
+    };
+  }, [activeShipment?.id, modalDocuments]);
+
   const linkedReceiving = useMemo<StoredReceivingRecord | null>(() => {
     if (!detail?.linkedReceivingId) return null;
     return getReceivingRecord(detail.linkedReceivingId);
   }, [detail]);
+
+  const shipmentLocked = activeShipment?.status === "Enviada" || activeShipment?.status === "Cancelada";
+  const canPrepareShipment = Boolean(
+    modalDocuments.length > 0 &&
+      validation.invalid.length === 0 &&
+      shipmentForm.name.trim() &&
+      shipmentForm.period.trim() &&
+      shipmentForm.responsible.trim() &&
+      !shipmentLocked,
+  );
+
+  const whatsappPreview = buildWhatsappMessage(shipmentForm, shipmentSummary);
 
   function clearFilters() {
     setPeriod("30");
@@ -111,10 +164,13 @@ export default function AccountingDocumentsWorkspace() {
 
   function markReady(document: FiscalDocumentRecord) {
     const check = canMarkFiscalDocumentReady(document);
-    if (!check.ok) {
+    const block = findDocumentAccountingShipmentBlock(document.id);
+    if (!check.ok || block) {
+      const missing = [...check.missing];
+      if (block) missing.push(`documento já vinculado à remessa ${block.name}`);
       setMessage({
         tone: "error",
-        text: `Documento incompleto para remessa: falta ${check.missing.join(", ")}.`,
+        text: `Documento incompleto para remessa: falta ${missing.join(", ")}.`,
       });
       return;
     }
@@ -124,12 +180,13 @@ export default function AccountingDocumentsWorkspace() {
   }
 
   function markPending(document: FiscalDocumentRecord) {
+    const block = findDocumentAccountingShipmentBlock(document.id);
+    if (block) {
+      setMessage({ tone: "error", text: `Este documento está vinculado à remessa ${block.name}.` });
+      return;
+    }
     updateFiscalDocumentStatus(document.id, "Pendente");
-    setSelectedIds((current) => {
-      const next = new Set(current);
-      next.delete(document.id);
-      return next;
-    });
+    setSelectedIds((current) => removeFromSet(current, document.id));
     setMessage({ tone: "info", text: "Documento voltou para pendente." });
     refresh();
   }
@@ -137,6 +194,11 @@ export default function AccountingDocumentsWorkspace() {
   function toggleSelection(document: FiscalDocumentRecord) {
     if (document.status !== "Pronto para envio") {
       setMessage({ tone: "info", text: "Selecione apenas documentos com status Pronto para envio." });
+      return;
+    }
+    const block = findDocumentAccountingShipmentBlock(document.id);
+    if (block) {
+      setMessage({ tone: "error", text: `Documento já está na remessa ${block.name}. Abra o histórico para revisar.` });
       return;
     }
     setSelectedIds((current) => {
@@ -147,30 +209,147 @@ export default function AccountingDocumentsWorkspace() {
     });
   }
 
-  function openReview() {
+  function openNewShipmentReview() {
     if (selectedDocuments.length === 0) {
       setMessage({ tone: "error", text: "Selecione ao menos um documento pronto para preparar a remessa." });
       return;
     }
+    const now = new Date();
+    setActiveShipment(null);
+    setShipmentForm({
+      name: defaultShipmentName(now),
+      period: inferPeriod(selectedDocuments),
+      responsible: "",
+      notes: "",
+    });
+    setCopyFeedback("");
     setReviewOpen(true);
   }
 
-  function saveShipmentDraft() {
-    if (!shipmentResponsible.trim()) {
-      setMessage({ tone: "error", text: "Informe o responsável pela preparação da remessa." });
+  function openShipmentDetails(shipment: AccountingShipmentDraft) {
+    setActiveShipment(shipment);
+    setSelectedIds(new Set());
+    setShipmentForm({
+      name: shipment.name,
+      period: shipment.period,
+      responsible: shipment.responsible,
+      notes: shipment.notes,
+    });
+    setCopyFeedback("");
+    setReviewOpen(true);
+  }
+
+  function removeDocumentFromShipment(documentId: string) {
+    if (shipmentLocked) return;
+    if (activeShipment) {
+      const nextIds = activeShipment.documentIds.filter((id) => id !== documentId);
+      setActiveShipment({ ...activeShipment, documentIds: nextIds });
       return;
     }
-    const draft = saveAccountingShipmentDraft({
-      documentIds: selectedDocuments.map((document) => document.id),
-      responsible: shipmentResponsible.trim(),
-      notes: shipmentNotes.trim(),
+    setSelectedIds((current) => removeFromSet(current, documentId));
+  }
+
+  function saveShipment(statusToSave: AccountingShipmentStatus = "Rascunho") {
+    if (shipmentLocked) {
+      setMessage({ tone: "error", text: "Remessas enviadas ou canceladas não podem ser editadas." });
+      return null;
+    }
+    if (!shipmentForm.name.trim() || !shipmentForm.period.trim() || !shipmentForm.responsible.trim()) {
+      setMessage({ tone: "error", text: "Informe nome, período e responsável para salvar a remessa." });
+      return null;
+    }
+    if (modalDocuments.length === 0) {
+      setMessage({ tone: "error", text: "Inclua ao menos um documento na remessa." });
+      return null;
+    }
+    const invalidBlock = validation.invalid.find((item) =>
+      item.reasons.some((reason) => reason.includes("outra remessa")),
+    );
+    if (invalidBlock) {
+      setMessage({ tone: "error", text: "Há documento vinculado a outra remessa ativa ou enviada." });
+      return null;
+    }
+    const saved = saveAccountingShipmentDraft({
+      id: activeShipment?.id,
+      name: shipmentForm.name.trim(),
+      period: shipmentForm.period.trim(),
+      documentIds: modalDocuments.map((document) => document.id),
+      responsible: shipmentForm.responsible.trim(),
+      notes: shipmentForm.notes.trim(),
+      status: statusToSave,
     });
-    setMessage({ tone: "success", text: `Remessa ${draft.id} salva como rascunho. Nenhum envio externo foi realizado.` });
-    setReviewOpen(false);
-    setShipmentResponsible("");
-    setShipmentNotes("");
+    setActiveShipment(saved);
     setSelectedIds(new Set());
     refresh();
+    setMessage({
+      tone: "success",
+      text: statusToSave === "Pronta para envio"
+        ? `Remessa ${saved.name} marcada como pronta para envio.`
+        : `Remessa ${saved.name} salva como rascunho.`,
+    });
+    return saved;
+  }
+
+  function markShipmentReady() {
+    if (!canPrepareShipment) {
+      setMessage({ tone: "error", text: "Revise a conferência da remessa antes de marcar como pronta." });
+      return;
+    }
+    saveShipment("Pronta para envio");
+  }
+
+  function markShipmentSent() {
+    if (!canPrepareShipment && activeShipment?.status !== "Pronta para envio") {
+      setMessage({ tone: "error", text: "A remessa precisa estar válida e pronta antes do registro de envio." });
+      return;
+    }
+    const confirmed = window.confirm(
+      "Confirme somente após enviar os documentos à contabilidade. Esta ação registrará data, hora e responsável.",
+    );
+    if (!confirmed) return;
+    const base = activeShipment?.status === "Pronta para envio"
+      ? activeShipment
+      : saveShipment("Pronta para envio");
+    if (!base) return;
+    const sent = updateAccountingShipmentStatus(base.id, "Enviada", { responsible: shipmentForm.responsible });
+    modalDocuments.forEach((document) => updateFiscalDocumentStatus(document.id, "Enviado"));
+    if (sent) setActiveShipment(sent);
+    refresh();
+    setMessage({ tone: "success", text: "Remessa marcada manualmente como enviada. Nenhum envio automático foi realizado." });
+  }
+
+  function cancelShipment() {
+    const base = activeShipment ?? saveShipment("Rascunho");
+    if (!base) return;
+    if (base.status === "Enviada") {
+      setMessage({ tone: "error", text: "Remessa enviada não pode ser cancelada nesta etapa." });
+      return;
+    }
+    const proceed = window.confirm("Cancelar esta remessa? O histórico será mantido e os documentos serão liberados.");
+    if (!proceed) return;
+    const reason = window.prompt("Motivo do cancelamento (opcional):") ?? "";
+    const cancelled = updateAccountingShipmentStatus(base.id, "Cancelada", { cancellationReason: reason });
+    if (cancelled) setActiveShipment(cancelled);
+    setSelectedIds(new Set());
+    refresh();
+    setMessage({ tone: "info", text: "Remessa cancelada. Os documentos foram liberados para uma nova remessa, se não estiverem enviados." });
+  }
+
+  function downloadCurrentCsv() {
+    downloadShipmentCsv({
+      form: shipmentForm,
+      documents: modalDocuments,
+      status: activeShipment?.status ?? "Rascunho",
+    });
+  }
+
+  async function copyWhatsappMessage() {
+    try {
+      await navigator.clipboard.writeText(whatsappPreview);
+      setCopyFeedback("Mensagem copiada.");
+    } catch {
+      setCopyFeedback("Não foi possível copiar automaticamente. Selecione o texto e copie manualmente.");
+    }
   }
 
   return (
@@ -198,11 +377,11 @@ export default function AccountingDocumentsWorkspace() {
             <p className="text-sm font-semibold text-sky-700">Central fiscal operacional</p>
             <h1 className="mt-1 text-2xl font-bold tracking-tight sm:text-4xl">Documentos para Contabilidade</h1>
             <p className="mt-2 max-w-3xl text-sm text-slate-600">
-              Separe NF-e e CT-e finalizadas, revise pendências e prepare rascunhos de remessa sem envio externo.
+              Separe NF-e e CT-e finalizadas, revise pendências e prepare remessas sem envio externo.
             </p>
           </div>
           <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600 shadow-sm">
-            <strong className="text-slate-950">{shipments.length}</strong> remessa(s) em rascunho
+            <strong className="text-slate-950">{shipments.length}</strong> remessa(s) no histórico
           </div>
         </header>
 
@@ -259,8 +438,8 @@ export default function AccountingDocumentsWorkspace() {
               <h2 className="text-lg font-bold">Documentos fiscais</h2>
               <p className="text-sm text-slate-500">{filteredDocuments.length} documento(s) encontrado(s)</p>
             </div>
-            <button className="rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-sky-700 disabled:bg-slate-300" disabled={selectedDocuments.length === 0} onClick={openReview} type="button">
-              Preparar remessa
+            <button className="rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-sky-700 disabled:bg-slate-300" disabled={selectedDocuments.length === 0} onClick={openNewShipmentReview} type="button">
+              Nova remessa
             </button>
           </div>
 
@@ -288,6 +467,7 @@ export default function AccountingDocumentsWorkspace() {
                         document={document}
                         key={document.id}
                         selected={selectedIds.has(document.id)}
+                        shipmentBlock={findDocumentAccountingShipmentBlock(document.id)}
                         onSelect={toggleSelection}
                         onDetail={(item) => { setDetail(item); setShowLinkedReceiving(false); }}
                         onMarkReady={markReady}
@@ -304,6 +484,7 @@ export default function AccountingDocumentsWorkspace() {
                     document={document}
                     key={document.id}
                     selected={selectedIds.has(document.id)}
+                    shipmentBlock={findDocumentAccountingShipmentBlock(document.id)}
                     onSelect={toggleSelection}
                     onDetail={(item) => { setDetail(item); setShowLinkedReceiving(false); }}
                     onMarkReady={markReady}
@@ -314,6 +495,53 @@ export default function AccountingDocumentsWorkspace() {
             </>
           )}
         </section>
+
+        <section className="mt-5 overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+          <div className="border-b border-slate-200 px-4 py-4 sm:px-5">
+            <h2 className="text-lg font-bold">Histórico de remessas</h2>
+            <p className="text-sm text-slate-500">Rascunhos, remessas prontas, enviadas manualmente e canceladas.</p>
+          </div>
+          {shipments.length === 0 ? (
+            <div className="p-6 text-sm text-slate-500">Nenhuma remessa criada ainda.</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-left text-sm">
+                <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                  <tr>
+                    <th className="px-5 py-3">Nome</th>
+                    <th className="px-5 py-3">Período</th>
+                    <th className="px-5 py-3">Responsável</th>
+                    <th className="px-5 py-3">Documentos</th>
+                    <th className="px-5 py-3">Status</th>
+                    <th className="px-5 py-3">Data</th>
+                    <th className="px-5 py-3 text-right">Ações</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {shipments.map((shipment) => {
+                    const shipmentDocuments = documents.filter((document) => shipment.documentIds.includes(document.id));
+                    return (
+                      <tr key={shipment.id}>
+                        <td className="px-5 py-4 font-semibold">{shipment.name}</td>
+                        <td className="px-5 py-4">{shipment.period || "Não informado"}</td>
+                        <td className="px-5 py-4">{shipment.responsible || "Não informado"}</td>
+                        <td className="px-5 py-4">{shipment.documentIds.length}</td>
+                        <td className="px-5 py-4"><ShipmentStatusBadge status={shipment.status} /></td>
+                        <td className="px-5 py-4">{formatDate(shipment.sentAt || shipment.updatedAt || shipment.createdAt)}</td>
+                        <td className="px-5 py-4">
+                          <div className="flex justify-end gap-2">
+                            <button className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-bold" onClick={() => openShipmentDetails(shipment)} type="button">Ver detalhes</button>
+                            <button className="rounded-lg border border-sky-300 px-3 py-2 text-xs font-bold text-sky-700" onClick={() => downloadShipmentCsv({ form: shipment, documents: shipmentDocuments, status: shipment.status })} type="button">Baixar CSV</button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
       </main>
 
       {selectedDocuments.length > 0 && (
@@ -322,11 +550,11 @@ export default function AccountingDocumentsWorkspace() {
             <div className="text-sm">
               <strong>{selectedDocuments.length}</strong> documento(s) selecionado(s)
               <p className="text-slate-500">
-                XML: {selectedDocuments.filter((document) => document.hasXml).length} · PDF: {selectedDocuments.filter((document) => document.hasPdf).length}
+                NF-e: {selectedDocuments.filter((document) => document.type === "NFE").length} · CT-e: {selectedDocuments.filter((document) => document.type === "CTE").length}
               </p>
             </div>
-            <button className="rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-sky-700" onClick={openReview} type="button">
-              Preparar remessa
+            <button className="rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-sky-700" onClick={openNewShipmentReview} type="button">
+              Nova remessa
             </button>
           </div>
         </div>
@@ -383,33 +611,124 @@ export default function AccountingDocumentsWorkspace() {
       )}
 
       {reviewOpen && (
-        <Modal title="Preparar remessa contábil" onClose={() => setReviewOpen(false)}>
-          <div className="grid gap-3 sm:grid-cols-3">
-            <MetricCard accent="blue" label="Documentos" value={selectedDocuments.length} compact />
-            <MetricCard accent="emerald" label="Com XML" value={selectedDocuments.filter((document) => document.hasXml).length} compact />
-            <MetricCard accent="violet" label="Com PDF" value={selectedDocuments.filter((document) => document.hasPdf).length} compact />
-          </div>
-          <div className="mt-4 max-h-56 overflow-auto rounded-2xl border border-slate-200">
-            {selectedDocuments.map((document) => (
-              <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-4 py-3 text-sm last:border-b-0" key={document.id}>
-                <span className="font-semibold">{labelType(document.type)} {document.number || "sem número"}</span>
-                <span className="text-slate-500">{fileLabel(document)}</span>
-              </div>
-            ))}
-          </div>
-          <div className="mt-4 grid gap-3">
+        <Modal title={activeShipment ? "Detalhes da remessa" : "Nova remessa para Contabilidade"} onClose={() => setReviewOpen(false)} wide>
+          <p className="mb-4 text-sm text-slate-600">Revise os documentos antes de preparar o envio.</p>
+
+          <div className="grid gap-3 lg:grid-cols-2">
             <label className="text-sm font-semibold text-slate-700">
-              Responsável pela remessa
-              <input className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2.5 font-normal" value={shipmentResponsible} onChange={(event) => setShipmentResponsible(event.target.value)} />
+              Nome da remessa
+              <input className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2.5 font-normal disabled:bg-slate-100" disabled={shipmentLocked} value={shipmentForm.name} onChange={(event) => setShipmentForm((current) => ({ ...current, name: event.target.value }))} />
+            </label>
+            <label className="text-sm font-semibold text-slate-700">
+              Período
+              <input className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2.5 font-normal disabled:bg-slate-100" disabled={shipmentLocked} value={shipmentForm.period} onChange={(event) => setShipmentForm((current) => ({ ...current, period: event.target.value }))} />
+            </label>
+            <label className="text-sm font-semibold text-slate-700">
+              Responsável
+              <input className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2.5 font-normal disabled:bg-slate-100" disabled={shipmentLocked} value={shipmentForm.responsible} onChange={(event) => setShipmentForm((current) => ({ ...current, responsible: event.target.value }))} />
             </label>
             <label className="text-sm font-semibold text-slate-700">
               Observação opcional
-              <textarea className="mt-1 min-h-24 w-full rounded-xl border border-slate-300 px-3 py-2.5 font-normal" value={shipmentNotes} onChange={(event) => setShipmentNotes(event.target.value)} />
+              <input className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2.5 font-normal disabled:bg-slate-100" disabled={shipmentLocked} value={shipmentForm.notes} onChange={(event) => setShipmentForm((current) => ({ ...current, notes: event.target.value }))} />
             </label>
           </div>
-          <div className="mt-5 flex justify-end gap-2">
-            <button className="rounded-xl border border-slate-300 px-4 py-2.5 text-sm font-bold" onClick={() => setReviewOpen(false)} type="button">Cancelar</button>
-            <button className="rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-bold text-white" onClick={saveShipmentDraft} type="button">Salvar rascunho</button>
+
+          <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+            <MetricCard accent="blue" label="Total" value={shipmentSummary.total} compact />
+            <MetricCard accent="emerald" label="NF-e" value={shipmentSummary.nfe} compact />
+            <MetricCard accent="violet" label="CT-e" value={shipmentSummary.cte} compact />
+            <MetricCard accent="blue" label="XMLs" value={shipmentSummary.xml} compact />
+            <MetricCard accent="slate" label="PDFs" value={shipmentSummary.pdf} compact />
+          </div>
+
+          <section className="mt-5 rounded-2xl border border-slate-200 p-4">
+            <h3 className="font-bold">Conferência da remessa</h3>
+            <div className="mt-3 grid gap-3 sm:grid-cols-3">
+              <ValidationPill label="Documentos válidos" ok={validation.invalid.length === 0} value={validation.validCount} />
+              <ValidationPill label="Arquivos disponíveis" ok={validation.filesAvailable === modalDocuments.length} value={validation.filesAvailable} />
+              <ValidationPill label="Documentos incompletos" ok={validation.invalid.length === 0} value={validation.invalid.length} />
+            </div>
+            {validation.withoutPdfButWithXml > 0 && (
+              <p className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-800">
+                {validation.withoutPdfButWithXml} documento(s) não possuem PDF, mas têm XML disponível. Isso não bloqueia a remessa.
+              </p>
+            )}
+            {validation.invalid.length > 0 && (
+              <div className="mt-3 rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-800">
+                {validation.invalid.map((item) => (
+                  <p key={item.document.id}>
+                    {labelType(item.document.type)} {item.document.number || "sem número"}: {item.reasons.join(", ")}
+                  </p>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="mt-5 overflow-hidden rounded-2xl border border-slate-200">
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-left text-sm">
+                <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                  <tr>
+                    <th className="px-4 py-3">Tipo</th>
+                    <th className="px-4 py-3">Número</th>
+                    <th className="px-4 py-3">Emitente</th>
+                    <th className="px-4 py-3">XML disponível</th>
+                    <th className="px-4 py-3">PDF disponível</th>
+                    <th className="px-4 py-3">Status</th>
+                    <th className="px-4 py-3 text-right">Remover</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {modalDocuments.map((document) => (
+                    <tr key={document.id}>
+                      <td className="px-4 py-3 font-bold">{labelType(document.type)}</td>
+                      <td className="px-4 py-3">{document.number || "Sem número"}</td>
+                      <td className="px-4 py-3">{document.issuer || "Não informado"}</td>
+                      <td className="px-4 py-3">{document.hasXml ? "Sim" : "Não"}</td>
+                      <td className="px-4 py-3">{document.hasPdf ? "Sim" : "Não"}</td>
+                      <td className="px-4 py-3"><StatusBadge status={document.status} /></td>
+                      <td className="px-4 py-3 text-right">
+                        <button className="rounded-lg px-3 py-2 text-xs font-bold text-rose-700 hover:bg-rose-50 disabled:text-slate-400" disabled={shipmentLocked} onClick={() => removeDocumentFromShipment(document.id)} type="button">
+                          Remover
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section className="mt-5 rounded-2xl border border-slate-200 p-4">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <h3 className="font-bold">Prévia da mensagem para WhatsApp</h3>
+                <p className="text-sm text-slate-500">Apenas copia o texto. Nenhuma conversa será aberta automaticamente.</p>
+              </div>
+              <button className="rounded-xl border border-sky-300 px-4 py-2.5 text-sm font-bold text-sky-700" onClick={() => void copyWhatsappMessage()} type="button">
+                Copiar mensagem
+              </button>
+            </div>
+            <pre className="mt-3 whitespace-pre-wrap rounded-xl bg-slate-950 p-4 text-sm text-white">{whatsappPreview}</pre>
+            {copyFeedback && <p className="mt-2 text-sm font-semibold text-emerald-700">{copyFeedback}</p>}
+          </section>
+
+          <div className="mt-5 flex flex-col gap-2 border-t border-slate-200 pt-4 sm:flex-row sm:flex-wrap sm:justify-end">
+            <button className="rounded-xl border border-slate-300 px-4 py-2.5 text-sm font-bold disabled:text-slate-400" disabled={shipmentLocked} onClick={() => saveShipment("Rascunho")} type="button">
+              Salvar rascunho
+            </button>
+            <button className="rounded-xl border border-emerald-300 px-4 py-2.5 text-sm font-bold text-emerald-700 disabled:text-slate-400" disabled={!canPrepareShipment} onClick={markShipmentReady} type="button">
+              Marcar como pronta
+            </button>
+            <button className="rounded-xl border border-sky-300 px-4 py-2.5 text-sm font-bold text-sky-700" disabled={modalDocuments.length === 0} onClick={downloadCurrentCsv} type="button">
+              Baixar resumo CSV
+            </button>
+            <button className="rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-bold text-white disabled:bg-slate-300" disabled={shipmentLocked || modalDocuments.length === 0} onClick={markShipmentSent} type="button">
+              Marcar como enviada
+            </button>
+            <button className="rounded-xl px-4 py-2.5 text-sm font-bold text-rose-700 hover:bg-rose-50 disabled:text-slate-400" disabled={activeShipment?.status === "Enviada" || activeShipment?.status === "Cancelada"} onClick={cancelShipment} type="button">
+              Cancelar remessa
+            </button>
           </div>
         </Modal>
       )}
@@ -417,9 +736,20 @@ export default function AccountingDocumentsWorkspace() {
   );
 }
 
+type DocumentActionsProps = {
+  document: FiscalDocumentRecord;
+  selected: boolean;
+  shipmentBlock: AccountingShipmentDraft | null;
+  onSelect: (document: FiscalDocumentRecord) => void;
+  onDetail: (document: FiscalDocumentRecord) => void;
+  onMarkReady: (document: FiscalDocumentRecord) => void;
+  onMarkPending: (document: FiscalDocumentRecord) => void;
+};
+
 function DocumentRow({
   document,
   selected,
+  shipmentBlock,
   onSelect,
   onDetail,
   onMarkReady,
@@ -428,12 +758,13 @@ function DocumentRow({
   return (
     <tr className="align-top">
       <td className="px-5 py-4">
-        <input checked={selected} disabled={document.status !== "Pronto para envio"} onChange={() => onSelect(document)} type="checkbox" />
+        <input checked={selected} disabled={document.status !== "Pronto para envio" || Boolean(shipmentBlock)} onChange={() => onSelect(document)} type="checkbox" />
       </td>
       <td className="px-5 py-4 font-bold">{labelType(document.type)}</td>
       <td className="px-5 py-4">
         <p className="font-semibold">{document.number || "Sem número"}</p>
-        <p className="mt-1 max-w-52 break-all font-mono text-xs text-slate-500">{document.accessKey || "Sem chave"}</p>
+        <p className="mt-1 max-w-52 break-all font-mono text-xs text-slate-500">{maskAccessKey(document.accessKey)}</p>
+        {shipmentBlock && <p className="mt-1 text-xs font-semibold text-amber-700">Na remessa {shipmentBlock.name}</p>}
       </td>
       <td className="px-5 py-4">
         <p className="font-semibold">{document.issuer || "Não informado"}</p>
@@ -446,7 +777,7 @@ function DocumentRow({
         <div className="flex justify-end gap-2">
           <button className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-bold" onClick={() => onDetail(document)} type="button">Detalhes</button>
           {document.status === "Pronto para envio" ? (
-            <button className="rounded-lg border border-sky-300 px-3 py-2 text-xs font-bold text-sky-700" onClick={() => onMarkPending(document)} type="button">Pendente</button>
+            <button className="rounded-lg border border-sky-300 px-3 py-2 text-xs font-bold text-sky-700 disabled:text-slate-400" disabled={Boolean(shipmentBlock)} onClick={() => onMarkPending(document)} type="button">Pendente</button>
           ) : (
             <button className="rounded-lg bg-sky-600 px-3 py-2 text-xs font-bold text-white" onClick={() => onMarkReady(document)} type="button">Pronto</button>
           )}
@@ -457,7 +788,7 @@ function DocumentRow({
 }
 
 function DocumentCard(props: DocumentActionsProps) {
-  const { document, selected, onSelect, onDetail, onMarkReady, onMarkPending } = props;
+  const { document, selected, shipmentBlock, onSelect, onDetail, onMarkReady, onMarkPending } = props;
   return (
     <article className="rounded-2xl border border-slate-200 p-4">
       <div className="flex items-start justify-between gap-3">
@@ -466,8 +797,9 @@ function DocumentCard(props: DocumentActionsProps) {
           <h3 className="mt-1 text-lg font-bold">{document.number || "Sem número"}</h3>
           <p className="text-sm text-slate-600">{document.issuer || "Emitente não informado"}</p>
         </div>
-        <input checked={selected} disabled={document.status !== "Pronto para envio"} onChange={() => onSelect(document)} type="checkbox" />
+        <input checked={selected} disabled={document.status !== "Pronto para envio" || Boolean(shipmentBlock)} onChange={() => onSelect(document)} type="checkbox" />
       </div>
+      {shipmentBlock && <p className="mt-2 rounded-lg bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-800">Na remessa {shipmentBlock.name}</p>}
       <div className="mt-3 grid gap-2 text-sm">
         <Info label="Emissão" value={formatDate(document.issuedAt)} />
         <Info label="Arquivos" value={fileLabel(document)} />
@@ -476,7 +808,7 @@ function DocumentCard(props: DocumentActionsProps) {
       <div className="mt-4 flex gap-2">
         <button className="flex-1 rounded-xl border border-slate-300 px-3 py-2 text-sm font-bold" onClick={() => onDetail(document)} type="button">Detalhes</button>
         {document.status === "Pronto para envio" ? (
-          <button className="flex-1 rounded-xl border border-sky-300 px-3 py-2 text-sm font-bold text-sky-700" onClick={() => onMarkPending(document)} type="button">Pendente</button>
+          <button className="flex-1 rounded-xl border border-sky-300 px-3 py-2 text-sm font-bold text-sky-700 disabled:text-slate-400" disabled={Boolean(shipmentBlock)} onClick={() => onMarkPending(document)} type="button">Pendente</button>
         ) : (
           <button className="flex-1 rounded-xl bg-sky-600 px-3 py-2 text-sm font-bold text-white" onClick={() => onMarkReady(document)} type="button">Pronto</button>
         )}
@@ -484,15 +816,6 @@ function DocumentCard(props: DocumentActionsProps) {
     </article>
   );
 }
-
-type DocumentActionsProps = {
-  document: FiscalDocumentRecord;
-  selected: boolean;
-  onSelect: (document: FiscalDocumentRecord) => void;
-  onDetail: (document: FiscalDocumentRecord) => void;
-  onMarkReady: (document: FiscalDocumentRecord) => void;
-  onMarkPending: (document: FiscalDocumentRecord) => void;
-};
 
 function MetricCard({ accent, label, value, compact = false }: { accent: "blue" | "emerald" | "violet" | "slate"; label: string; value: number; compact?: boolean }) {
   const accents = {
@@ -531,6 +854,25 @@ function StatusBadge({ status }: { status: FiscalDocumentStatus }) {
   return <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-bold ring-1 ${styles[status]}`}>{status}</span>;
 }
 
+function ShipmentStatusBadge({ status }: { status: AccountingShipmentStatus }) {
+  const styles: Record<AccountingShipmentStatus, string> = {
+    Rascunho: "bg-slate-50 text-slate-700 ring-slate-200",
+    "Pronta para envio": "bg-emerald-50 text-emerald-800 ring-emerald-200",
+    Enviada: "bg-blue-50 text-blue-800 ring-blue-200",
+    Cancelada: "bg-rose-50 text-rose-800 ring-rose-200",
+  };
+  return <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-bold ring-1 ${styles[status]}`}>{status}</span>;
+}
+
+function ValidationPill({ label, ok, value }: { label: string; ok: boolean; value: number }) {
+  return (
+    <div className={`rounded-2xl px-4 py-3 ${ok ? "bg-emerald-50 text-emerald-800" : "bg-rose-50 text-rose-800"}`}>
+      <p className="text-xs font-bold uppercase tracking-wide">{label}</p>
+      <strong className="mt-1 block text-2xl">{value}</strong>
+    </div>
+  );
+}
+
 function Info({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-start justify-between gap-4 rounded-xl bg-slate-50 px-3 py-2">
@@ -540,11 +882,11 @@ function Info({ label, value }: { label: string; value: string }) {
   );
 }
 
-function Modal({ children, title, onClose }: { children: React.ReactNode; title: string; onClose: () => void }) {
+function Modal({ children, title, onClose, wide = false }: { children: React.ReactNode; title: string; onClose: () => void; wide?: boolean }) {
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/60 p-4">
-      <section className="max-h-[90vh] w-full max-w-3xl overflow-auto rounded-3xl bg-white p-5 shadow-2xl">
-        <div className="mb-4 flex items-center justify-between gap-4">
+      <section className={`max-h-[90vh] w-full overflow-auto rounded-3xl bg-white p-5 shadow-2xl ${wide ? "max-w-6xl" : "max-w-3xl"}`}>
+        <div className="mb-2 flex items-center justify-between gap-4">
           <h2 className="text-xl font-bold">{title}</h2>
           <button className="rounded-full border border-slate-300 px-3 py-1 text-sm font-bold" onClick={onClose} type="button">Fechar</button>
         </div>
@@ -570,6 +912,66 @@ function EmptyState({ hasDocuments }: { hasDocuments: boolean }) {
   );
 }
 
+function buildShipmentSummary(documents: FiscalDocumentRecord[]) {
+  return {
+    total: documents.length,
+    nfe: documents.filter((document) => document.type === "NFE").length,
+    cte: documents.filter((document) => document.type === "CTE").length,
+    xml: documents.filter((document) => document.hasXml).length,
+    pdf: documents.filter((document) => document.hasPdf).length,
+  };
+}
+
+function buildWhatsappMessage(form: ShipmentForm, summary: ReturnType<typeof buildShipmentSummary>) {
+  return [
+    "Olá!",
+    `Segue a remessa de documentos fiscais referente ao período ${form.period || "[PERÍODO]"}.`,
+    "",
+    `Total: ${summary.total} documentos`,
+    `NF-e: ${summary.nfe}`,
+    `CT-e: ${summary.cte}`,
+    `XMLs disponíveis: ${summary.xml}`,
+    `PDFs disponíveis: ${summary.pdf}`,
+    "",
+    `Remessa: ${form.name || "[NOME]"}`,
+    "",
+    "Atenciosamente,",
+    form.responsible || "[RESPONSÁVEL]",
+  ].join("\n");
+}
+
+function downloadShipmentCsv(input: {
+  form: Pick<ShipmentForm, "name" | "period" | "responsible">;
+  documents: FiscalDocumentRecord[];
+  status: AccountingShipmentStatus;
+}) {
+  const rows = [
+    ["nome da remessa", "status", "período", "responsável", "tipo", "número", "emitente", "chave mascarada", "XML disponível", "PDF disponível"],
+    ...input.documents.map((document) => [
+      input.form.name,
+      input.status,
+      input.form.period,
+      input.form.responsible,
+      labelType(document.type),
+      document.number || "",
+      document.issuer || "",
+      maskAccessKey(document.accessKey),
+      document.hasXml ? "Sim" : "Não",
+      document.hasPdf ? "Sim" : "Não",
+    ]),
+  ];
+  const csv = rows.map((row) => row.map(escapeCsvCell).join(";")).join("\r\n");
+  const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `stockscan-remessa-${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
 function labelType(type: FiscalDocumentType) {
   return type === "NFE" ? "NF-e" : "CT-e";
 }
@@ -586,7 +988,7 @@ function formatCurrency(value: number | null) {
   return value.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 }
 
-function formatDate(value: string) {
+function formatDate(value: string | null) {
   if (!value) return "Não informado";
   const parsed = parseDateValue(value);
   if (!parsed) return value;
@@ -619,6 +1021,33 @@ function parseDateValue(value: string) {
   const [, day, month, year, hour = "00", minute = "00"] = match;
   const parsed = new Date(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute));
   return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function inferPeriod(documents: FiscalDocumentRecord[]) {
+  const values = documents.map((document) => formatDate(document.issuedAt)).filter((value) => value !== "Não informado");
+  if (values.length === 0) return "Período não informado";
+  return values.length === 1 ? values[0] : `${values[0]} — ${values[values.length - 1]}`;
+}
+
+function defaultShipmentName(now: Date) {
+  return `Remessa contábil ${now.toLocaleDateString("pt-BR")}`;
+}
+
+function maskAccessKey(key: string) {
+  const digits = key.replace(/\D/g, "");
+  if (digits.length < 12) return "Chave não informada";
+  return `${digits.slice(0, 6)}••••••••••••••••••••••••••••••••${digits.slice(-6)}`;
+}
+
+function escapeCsvCell(value: string) {
+  if (/[";\n\r]/.test(value)) return `"${value.replace(/"/g, '""')}"`;
+  return value;
+}
+
+function removeFromSet(current: Set<string>, value: string) {
+  const next = new Set(current);
+  next.delete(value);
+  return next;
 }
 
 function messageClass(tone: "success" | "error" | "info") {

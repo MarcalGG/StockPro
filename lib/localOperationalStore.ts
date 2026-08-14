@@ -107,17 +107,29 @@ export type FiscalDocumentRecord = {
   updatedAt: string;
 };
 
+export type AccountingShipmentStatus =
+  | "Rascunho"
+  | "Pronta para envio"
+  | "Enviada"
+  | "Cancelada";
+
 export type AccountingShipmentDraft = {
   id: string;
-  status: "Rascunho";
+  name: string;
+  period: string;
   documentIds: string[];
   responsible: string;
   notes: string;
+  nfeCount: number;
+  cteCount: number;
   xmlCount: number;
   pdfCount: number;
-  incompleteCount: number;
+  status: AccountingShipmentStatus;
   createdAt: string;
   updatedAt: string;
+  sentAt: string | null;
+  cancelledAt?: string | null;
+  cancellationReason?: string;
 };
 
 export type InventoryItemDraft = {
@@ -415,30 +427,90 @@ export function canMarkFiscalDocumentReady(record: FiscalDocumentRecord) {
 }
 
 export function listAccountingShipmentDrafts() {
-  return readJson<AccountingShipmentDraft[]>(ACCOUNTING_SHIPMENTS_KEY, []);
+  return readJson<AccountingShipmentDraft[]>(ACCOUNTING_SHIPMENTS_KEY, [])
+    .map(normalizeAccountingShipment)
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
 export function saveAccountingShipmentDraft(input: {
+  id?: string;
+  name?: string;
+  period?: string;
   documentIds: string[];
   responsible: string;
   notes: string;
+  status?: AccountingShipmentStatus;
 }) {
   const now = new Date().toISOString();
   const documents = listFiscalDocuments().filter((item) => input.documentIds.includes(item.id));
+  const records = listAccountingShipmentDrafts();
+  const existing = input.id ? records.find((item) => item.id === input.id) : null;
   const draft: AccountingShipmentDraft = {
-    id: createOperationalId("remessa"),
-    status: "Rascunho",
+    id: existing?.id ?? input.id ?? createOperationalId("remessa"),
+    name: input.name?.trim() || existing?.name || defaultAccountingShipmentName(now),
+    period: input.period?.trim() || existing?.period || accountingShipmentPeriod(documents),
     documentIds: input.documentIds,
     responsible: input.responsible,
     notes: input.notes,
+    nfeCount: documents.filter((item) => item.type === "NFE").length,
+    cteCount: documents.filter((item) => item.type === "CTE").length,
     xmlCount: documents.filter((item) => item.hasXml).length,
     pdfCount: documents.filter((item) => item.hasPdf).length,
-    incompleteCount: documents.filter((item) => item.status !== "Pronto para envio").length,
-    createdAt: now,
+    status: input.status ?? existing?.status ?? "Rascunho",
+    createdAt: existing?.createdAt ?? now,
     updatedAt: now,
+    sentAt: existing?.sentAt ?? null,
+    cancelledAt: existing?.cancelledAt ?? null,
+    cancellationReason: existing?.cancellationReason ?? "",
   };
-  writeJson(ACCOUNTING_SHIPMENTS_KEY, [draft, ...listAccountingShipmentDrafts()].slice(0, 100));
+  writeJson(
+    ACCOUNTING_SHIPMENTS_KEY,
+    [draft, ...records.filter((item) => item.id !== draft.id)].slice(0, 100),
+  );
   return draft;
+}
+
+export function getAccountingShipment(id: string) {
+  return listAccountingShipmentDrafts().find((record) => record.id === id) ?? null;
+}
+
+export function updateAccountingShipmentStatus(
+  id: string,
+  status: AccountingShipmentStatus,
+  details?: { responsible?: string; cancellationReason?: string },
+) {
+  const records = listAccountingShipmentDrafts();
+  const current = records.find((record) => record.id === id);
+  if (!current) return null;
+  const now = new Date().toISOString();
+  const next: AccountingShipmentDraft = {
+    ...current,
+    responsible: details?.responsible?.trim() || current.responsible,
+    status,
+    updatedAt: now,
+    sentAt: status === "Enviada" ? now : current.sentAt,
+    cancelledAt: status === "Cancelada" ? now : current.cancelledAt,
+    cancellationReason: status === "Cancelada"
+      ? details?.cancellationReason?.trim() || current.cancellationReason || ""
+      : current.cancellationReason,
+  };
+  writeJson(ACCOUNTING_SHIPMENTS_KEY, [next, ...records.filter((record) => record.id !== id)]);
+  return next;
+}
+
+export function findDocumentAccountingShipmentBlock(documentId: string, exceptShipmentId?: string) {
+  return listAccountingShipmentDrafts().find((shipment) =>
+    shipment.id !== exceptShipmentId &&
+    shipment.status !== "Cancelada" &&
+    shipment.documentIds.includes(documentId),
+  ) ?? null;
+}
+
+export function listDocumentsAvailableForAccountingShipment(documentIds: string[], exceptShipmentId?: string) {
+  return documentIds.map((documentId) => ({
+    documentId,
+    shipment: findDocumentAccountingShipmentBlock(documentId, exceptShipmentId),
+  }));
 }
 
 function normalizeFiscalDocumentType(type: string): FiscalDocumentType | null {
@@ -472,6 +544,57 @@ function isValidAccessKey(key: string) {
   const remainder = sum % 11;
   const digit = remainder < 2 ? 0 : 11 - remainder;
   return digit === Number(key[43]);
+}
+
+function normalizeAccountingShipment(record: AccountingShipmentDraft): AccountingShipmentDraft {
+  const documents = listFiscalDocuments().filter((item) => record.documentIds?.includes(item.id));
+  const createdAt = record.createdAt || new Date().toISOString();
+  return {
+    ...record,
+    name: record.name || defaultAccountingShipmentName(createdAt),
+    period: record.period || accountingShipmentPeriod(documents),
+    documentIds: Array.isArray(record.documentIds) ? record.documentIds : [],
+    responsible: record.responsible || "",
+    notes: record.notes || "",
+    nfeCount: typeof record.nfeCount === "number"
+      ? record.nfeCount
+      : documents.filter((item) => item.type === "NFE").length,
+    cteCount: typeof record.cteCount === "number"
+      ? record.cteCount
+      : documents.filter((item) => item.type === "CTE").length,
+    xmlCount: typeof record.xmlCount === "number"
+      ? record.xmlCount
+      : documents.filter((item) => item.hasXml).length,
+    pdfCount: typeof record.pdfCount === "number"
+      ? record.pdfCount
+      : documents.filter((item) => item.hasPdf).length,
+    status: record.status || "Rascunho",
+    createdAt,
+    updatedAt: record.updatedAt || createdAt,
+    sentAt: record.sentAt ?? null,
+    cancelledAt: record.cancelledAt ?? null,
+    cancellationReason: record.cancellationReason ?? "",
+  };
+}
+
+function defaultAccountingShipmentName(isoDate: string) {
+  const date = new Date(isoDate);
+  const stamp = Number.isNaN(date.getTime())
+    ? new Date().toISOString().slice(0, 10)
+    : date.toISOString().slice(0, 10);
+  return `Remessa contábil ${stamp}`;
+}
+
+function accountingShipmentPeriod(documents: FiscalDocumentRecord[]) {
+  if (documents.length === 0) return "";
+  const sorted = documents
+    .map((document) => document.issuedAt || document.includedAt)
+    .filter(Boolean)
+    .sort();
+  if (sorted.length === 0) return "";
+  const first = sorted[0];
+  const last = sorted[sorted.length - 1];
+  return first === last ? first : `${first} — ${last}`;
 }
 
 function readJson<T>(key: string, fallback: T): T {
