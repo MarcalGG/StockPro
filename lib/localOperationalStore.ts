@@ -175,9 +175,12 @@ export function listConferenceDivergences() {
     record.divergences.map((divergence) => ({
       ...divergence,
       receiptId: record.id,
+      documentType: record.documentType,
       invoiceNumber: record.invoiceNumber,
       supplier: record.supplier,
+      responsible: record.responsible,
       finalizedAt: record.finalizedAt,
+      updatedAt: record.updatedAt,
     })),
   );
 }

@@ -10,6 +10,7 @@ import InventoryWorkspace from "./components/InventoryWorkspace";
 import ReceivingWorkspace, {
   type ReceivingPayload,
 } from "./components/ReceivingWorkspace";
+import ReportsWorkspace from "./components/ReportsWorkspace";
 import {
   clearCurrentReceivingDraft,
   createOperationalId,
@@ -1267,6 +1268,10 @@ export default function Home() {
     return <InventoryWorkspace onNavigate={setActiveTab} />;
   }
 
+  if (activeTab === "Relatorio") {
+    return <ReportsWorkspace onNavigate={setActiveTab} />;
+  }
+
   return (
     <main className="min-h-screen bg-[#eef3f8] text-slate-950">
       <div className="mx-auto flex min-w-0 max-w-7xl flex-col gap-4 px-3 py-3 pb-24 sm:gap-5 sm:px-6 sm:py-4 sm:pb-6 lg:px-8">
@@ -2464,7 +2469,7 @@ export default function Home() {
           </section>
         )}
 
-        {activeTab === "Relatorio" && (
+        {false && (
           <section className="grid gap-4 sm:gap-5 lg:grid-cols-[0.9fr_1.1fr]">
             <div className="rounded-2xl bg-white p-4 shadow-sm sm:p-5">
               <p className="text-sm font-semibold text-cyan-700">Etapa 4</p>
