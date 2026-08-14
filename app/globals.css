@@ -128,6 +128,44 @@ select:focus-visible {
   color: #bfdbfe;
 }
 
+.inventory-shell {
+  display: grid;
+  grid-template-columns: 244px minmax(0, 1fr);
+}
+
+.inventory-sidebar {
+  position: sticky;
+  top: 0;
+  display: flex;
+  height: 100vh;
+  flex-direction: column;
+  background: linear-gradient(180deg, #071f3d 0%, #0f3a67 100%);
+  padding: 1.5rem 0.75rem;
+  color: white;
+}
+
+.inventory-nav-link {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  border-radius: 0.5rem;
+  padding: 0.9rem 0.85rem;
+  text-align: left;
+  color: #dbeafe;
+  transition: background 160ms ease, color 160ms ease;
+}
+
+.inventory-nav-link:hover {
+  background: rgb(255 255 255 / 0.08);
+  color: white;
+}
+
+.inventory-nav-link-active {
+  background: #2563eb;
+  color: white;
+  font-weight: 700;
+}
+
 @media (max-width: 767px) {
   .receiving-shell {
     display: block;
@@ -135,6 +173,11 @@ select:focus-visible {
   }
 
   .conference-shell {
+    display: block;
+    padding-bottom: 96px;
+  }
+
+  .inventory-shell {
     display: block;
     padding-bottom: 96px;
   }
@@ -186,6 +229,35 @@ select:focus-visible {
   }
 
   .conference-nav-link {
+    min-width: max-content;
+    justify-content: center;
+    padding: 0.7rem 0.8rem;
+    font-size: 0.75rem;
+  }
+
+  .inventory-sidebar {
+    position: fixed;
+    z-index: 40;
+    inset: auto 0 0;
+    height: auto;
+    flex-direction: row;
+    gap: 0.25rem;
+    overflow-x: auto;
+    padding: 0.55rem max(0.55rem, env(safe-area-inset-right)) calc(0.55rem + env(safe-area-inset-bottom)) max(0.55rem, env(safe-area-inset-left));
+  }
+
+  .inventory-sidebar > div {
+    display: none;
+  }
+
+  .inventory-sidebar nav {
+    display: flex;
+    width: max-content;
+    min-width: 100%;
+    gap: 0.25rem;
+  }
+
+  .inventory-nav-link {
     min-width: max-content;
     justify-content: center;
     padding: 0.7rem 0.8rem;

@@ -1,7 +1,6 @@
 export type OperationalStatus =
   | "Em andamento"
   | "Conferencia finalizada"
-  | "Inventario em rascunho"
   | "Inventario finalizado";
 
 export type StoredConferenceItem = {
@@ -80,13 +79,31 @@ export type InventoryItemDraft = {
   status: string;
 };
 
+export type InventoryCountStatus = "Pendente" | "Confirmado" | "Falta" | "Sobra";
+
+export type InventoryCountItem = {
+  id: string;
+  code: string;
+  product: string;
+  unit: string;
+  expected: number | null;
+  counted: number | null;
+  difference: number | null;
+  status: InventoryCountStatus;
+  lastCountedAt: string | null;
+  note: string;
+  manual?: boolean;
+};
+
 export type StoredInventoryRecord = {
   id: string;
-  status: "Inventario em rascunho" | "Inventario finalizado";
+  status: "Em andamento" | "Finalizado";
   title: string;
+  sector: string;
   responsible: string;
+  startedAt: string;
   notes: string;
-  items: InventoryItemDraft[];
+  items: InventoryCountItem[];
   createdAt: string;
   updatedAt: string;
   finalizedAt: string | null;
@@ -189,6 +206,61 @@ export function saveInventoryRecord(record: StoredInventoryRecord) {
   return nextRecord;
 }
 
+export function createInventory(input: {
+  title: string;
+  sector: string;
+  responsible: string;
+  startedAt: string;
+  notes: string;
+  items?: InventoryCountItem[];
+}) {
+  const now = new Date().toISOString();
+  return saveInventoryRecord({
+    id: createOperationalId("inventario"),
+    status: "Em andamento",
+    title: input.title,
+    sector: input.sector,
+    responsible: input.responsible,
+    startedAt: input.startedAt,
+    notes: input.notes,
+    items: input.items ?? [],
+    createdAt: now,
+    updatedAt: now,
+    finalizedAt: null,
+  });
+}
+
+export function saveInventoryDraft(record: StoredInventoryRecord) {
+  return saveInventoryRecord({
+    ...record,
+    status: "Em andamento",
+    finalizedAt: null,
+  });
+}
+
+export function getActiveInventoryDraft() {
+  return listInventoryRecords()
+    .filter((record) => record.status === "Em andamento")
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] ?? null;
+}
+
+export function updateInventoryCounts(id: string, items: InventoryCountItem[]) {
+  return updateInventoryRecord(id, (record) => ({
+    ...record,
+    items,
+    status: "Em andamento",
+    finalizedAt: null,
+  }));
+}
+
+export function finalizeInventory(id: string, finalizedAt = new Date().toISOString()) {
+  return updateInventoryRecord(id, (record) => ({
+    ...record,
+    status: "Finalizado",
+    finalizedAt,
+  }));
+}
+
 export function updateInventoryRecord(
   id: string,
   updater: (record: StoredInventoryRecord) => StoredInventoryRecord,
@@ -199,7 +271,7 @@ export function updateInventoryRecord(
 }
 
 export function listFinalizedInventories() {
-  return listInventoryRecords().filter((record) => record.status === "Inventario finalizado");
+  return listInventoryRecords().filter((record) => record.status === "Finalizado");
 }
 
 function readJson<T>(key: string, fallback: T): T {

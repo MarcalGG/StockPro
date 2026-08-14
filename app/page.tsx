@@ -6,6 +6,7 @@ import ConferenceWorkspace, {
   type ConferenceDocument,
   type ConferenceStatus,
 } from "./components/ConferenceWorkspace";
+import InventoryWorkspace from "./components/InventoryWorkspace";
 import ReceivingWorkspace, {
   type ReceivingPayload,
 } from "./components/ReceivingWorkspace";
@@ -1262,6 +1263,10 @@ export default function Home() {
     );
   }
 
+  if (activeTab === "Inventario") {
+    return <InventoryWorkspace onNavigate={setActiveTab} />;
+  }
+
   return (
     <main className="min-h-screen bg-[#eef3f8] text-slate-950">
       <div className="mx-auto flex min-w-0 max-w-7xl flex-col gap-4 px-3 py-3 pb-24 sm:gap-5 sm:px-6 sm:py-4 sm:pb-6 lg:px-8">
@@ -2318,7 +2323,7 @@ export default function Home() {
           </section>
         )}
 
-        {activeTab === "Inventario" && (
+        {false && (
           <section className="grid gap-4 sm:gap-5 lg:grid-cols-[1fr_0.8fr]">
             <div className="rounded-2xl bg-white p-4 shadow-sm sm:p-5">
               <div className="flex items-start justify-between gap-4">
