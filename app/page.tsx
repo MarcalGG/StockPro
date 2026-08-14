@@ -17,6 +17,7 @@ import {
   getCurrentReceivingDraft,
   saveCurrentReceivingDraft,
   saveReceivingRecord,
+  upsertFiscalDocumentFromReceiving,
   type CurrentReceivingDraft,
   type StoredConferenceItem,
   type StoredDivergence,
@@ -128,6 +129,10 @@ export default function Home() {
   const [documentSeries, setDocumentSeries] = useState("");
   const [documentIssueDate, setDocumentIssueDate] = useState("");
   const [supplier, setSupplier] = useState("");
+  const [supplierCnpj, setSupplierCnpj] = useState("");
+  const [documentTotalValue, setDocumentTotalValue] = useState<number | null>(null);
+  const [documentHasXml, setDocumentHasXml] = useState(false);
+  const [documentHasPdf, setDocumentHasPdf] = useState(false);
   const [responsible, setResponsible] = useState("");
   const [entryDateTime, setEntryDateTime] = useState("");
   const [recebimentoId, setRecebimentoId] = useState(() => createOperationalId("recebimento"));
@@ -256,6 +261,10 @@ export default function Home() {
       documentType,
       documentSeries,
       documentIssueDate,
+      supplierCnpj,
+      totalValue: documentTotalValue,
+      hasXml: documentHasXml,
+      hasPdf: documentHasPdf,
       supplier,
       responsible,
       entryDateTime,
@@ -275,6 +284,10 @@ export default function Home() {
       invoiceNumber,
       documentSeries,
       documentIssueDate,
+      supplierCnpj,
+      totalValue: documentTotalValue,
+      hasXml: documentHasXml,
+      hasPdf: documentHasPdf,
       supplier,
       responsible,
       entryDateTime,
@@ -304,6 +317,12 @@ export default function Home() {
       if (typeof saved.documentType === "string") setDocumentType(saved.documentType);
       if (typeof saved.documentSeries === "string") setDocumentSeries(saved.documentSeries);
       if (typeof saved.documentIssueDate === "string") setDocumentIssueDate(saved.documentIssueDate);
+      if (typeof saved.supplierCnpj === "string") setSupplierCnpj(saved.supplierCnpj);
+      if (typeof saved.totalValue === "number" || saved.totalValue === null) {
+        setDocumentTotalValue(saved.totalValue ?? null);
+      }
+      if (typeof saved.hasXml === "boolean") setDocumentHasXml(saved.hasXml);
+      if (typeof saved.hasPdf === "boolean") setDocumentHasPdf(saved.hasPdf);
       if (typeof saved.supplier === "string") setSupplier(saved.supplier);
       if (typeof saved.responsible === "string") setResponsible(saved.responsible);
       if (typeof saved.entryDateTime === "string") setEntryDateTime(saved.entryDateTime);
@@ -325,6 +344,10 @@ export default function Home() {
       documentType,
       documentSeries,
       documentIssueDate,
+      supplierCnpj,
+      totalValue: documentTotalValue,
+      hasXml: documentHasXml,
+      hasPdf: documentHasPdf,
       supplier,
       responsible,
       entryDateTime,
@@ -342,6 +365,10 @@ export default function Home() {
     documentType,
     documentSeries,
     documentIssueDate,
+    supplierCnpj,
+    documentTotalValue,
+    documentHasXml,
+    documentHasPdf,
     supplier,
     responsible,
     entryDateTime,
@@ -654,8 +681,12 @@ export default function Home() {
       setDocumentIssueDate(xmlPreview.entryDateTime || parts.issue);
     }
     if (xmlPreview.supplier) setSupplier(xmlPreview.supplier);
+    if (xmlPreview.supplierCnpj) setSupplierCnpj(xmlPreview.supplierCnpj);
     if (xmlPreview.entryDateTime) setEntryDateTime(xmlPreview.entryDateTime);
     if (xmlPreview.accessKey) setInvoiceKey(xmlPreview.accessKey);
+    setDocumentHasXml(true);
+    setDocumentHasPdf(false);
+    setDocumentTotalValue(null);
     setXmlPreview(null);
     setActiveTab("Conferencia");
   }
@@ -683,6 +714,10 @@ export default function Home() {
     setDocumentSeries("");
     setDocumentIssueDate("");
     setSupplier("");
+    setSupplierCnpj("");
+    setDocumentTotalValue(null);
+    setDocumentHasXml(false);
+    setDocumentHasPdf(false);
     setResponsible("");
     setEntryDateTime("");
     setInventoryRows([]);
@@ -917,7 +952,8 @@ export default function Home() {
       minute: "2-digit",
     });
     setFinalizedAt(finalizedDate);
-    saveReceivingRecord(buildReceivingRecord("Conferencia finalizada", finalizedDate));
+    const savedRecord = saveReceivingRecord(buildReceivingRecord("Conferencia finalizada", finalizedDate));
+    upsertFiscalDocumentFromReceiving(savedRecord);
     setConferenceMessage({ tone: "success", text: "Conferencia finalizada. O recebimento ficou bloqueado para edicao direta." });
   }
 
@@ -1153,6 +1189,10 @@ export default function Home() {
     setDocumentSeries(payload.series || (parts?.series === "Aguardando" ? "" : parts?.series ?? ""));
     setDocumentIssueDate(payload.issueDate || payload.entryDateTime || (parts?.issue === "Aguardando" ? "" : parts?.issue ?? ""));
     setSupplier(payload.supplier);
+    setSupplierCnpj(payload.supplierCnpj || (parts?.cnpj === "Aguardando" ? "" : parts?.cnpj ?? ""));
+    setDocumentTotalValue(payload.totalValue);
+    setDocumentHasXml(payload.hasXml);
+    setDocumentHasPdf(payload.attachmentMimeType === "application/pdf");
     setResponsible(payload.responsible);
     setEntryDateTime(payload.entryDateTime);
     setReceivingNotes(payload.notes);

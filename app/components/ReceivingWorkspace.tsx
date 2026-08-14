@@ -21,10 +21,14 @@ export type ReceivingPayload = {
   series: string;
   issueDate: string;
   supplier: string;
+  supplierCnpj: string;
+  totalValue: number | null;
   responsible: string;
   entryDateTime: string;
   notes: string;
   attachmentUrl: string | null;
+  attachmentMimeType: string;
+  hasXml: boolean;
   items: ReceivingItem[];
 };
 
@@ -212,7 +216,23 @@ export default function ReceivingWorkspace({ onNavigate, onStart }: Props) {
     if (duplicate && !window.confirm("Já existe um recebimento com este documento. Deseja abrir o recebimento existente?\n\nOK abre a Conferência; Cancelar mantém esta tela.")) return;
     rememberDocument(document.accessKey, xmlFingerprint, effectiveNumber, effectiveSupplier, effectiveDate);
     setStatus("Em conferência");
-    onStart({ documentType: document.type, accessKey: document.accessKey, invoiceNumber: effectiveNumber, series: document.series, issueDate: document.issue, supplier: effectiveSupplier, responsible, entryDateTime: effectiveDate, notes, attachmentUrl: attachment?.url ?? null, items: document.items });
+    onStart({
+      documentType: document.type,
+      accessKey: document.accessKey,
+      invoiceNumber: effectiveNumber,
+      series: document.series,
+      issueDate: document.issue,
+      supplier: effectiveSupplier,
+      supplierCnpj: document.cnpj,
+      totalValue: document.value,
+      responsible,
+      entryDateTime: effectiveDate,
+      notes,
+      attachmentUrl: attachment?.url ?? null,
+      attachmentMimeType: attachment?.file.type ?? "",
+      hasXml: Boolean(xmlFingerprint),
+      items: document.items,
+    });
   }
 
   return (

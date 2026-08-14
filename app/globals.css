@@ -204,6 +204,46 @@ select:focus-visible {
   font-weight: 700;
 }
 
+.documents-shell {
+  display: grid;
+  grid-template-columns: 244px minmax(0, 1fr);
+}
+
+.documents-sidebar {
+  position: sticky;
+  top: 0;
+  display: flex;
+  height: 100vh;
+  flex-direction: column;
+  background: linear-gradient(180deg, #061d39 0%, #072d55 58%, #04182f 100%);
+  padding: 1.5rem 0.75rem;
+  color: white;
+}
+
+.documents-nav-link {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  border-radius: 0.75rem;
+  padding: 0.9rem 0.85rem;
+  text-align: left;
+  color: #dbeafe;
+  transition: background 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.documents-nav-link:hover {
+  background: rgb(255 255 255 / 0.08);
+  color: white;
+  transform: translateX(2px);
+}
+
+.documents-nav-link-active {
+  background: #0ea5e9;
+  color: white;
+  font-weight: 700;
+  box-shadow: 0 12px 30px rgb(14 165 233 / 0.28);
+}
+
 @media (max-width: 767px) {
   .receiving-shell {
     display: block;
@@ -223,6 +263,11 @@ select:focus-visible {
   .reports-shell {
     display: block;
     padding-bottom: 76px;
+  }
+
+  .documents-shell {
+    display: block;
+    padding-bottom: 96px;
   }
 
   .receiving-sidebar {
@@ -330,6 +375,35 @@ select:focus-visible {
   }
 
   .reports-nav-link {
+    min-width: max-content;
+    justify-content: center;
+    padding: 0.7rem 0.8rem;
+    font-size: 0.75rem;
+  }
+
+  .documents-sidebar {
+    position: fixed;
+    z-index: 40;
+    inset: auto 0 0;
+    height: auto;
+    flex-direction: row;
+    gap: 0.25rem;
+    overflow-x: auto;
+    padding: 0.55rem max(0.55rem, env(safe-area-inset-right)) calc(0.55rem + env(safe-area-inset-bottom)) max(0.55rem, env(safe-area-inset-left));
+  }
+
+  .documents-sidebar > div {
+    display: none;
+  }
+
+  .documents-sidebar nav {
+    display: flex;
+    width: max-content;
+    min-width: 100%;
+    gap: 0.25rem;
+  }
+
+  .documents-nav-link {
     min-width: max-content;
     justify-content: center;
     padding: 0.7rem 0.8rem;
