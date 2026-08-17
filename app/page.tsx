@@ -11,6 +11,8 @@ import ReceivingWorkspace, {
   type ReceivingPayload,
 } from "./components/ReceivingWorkspace";
 import ReportsWorkspace from "./components/ReportsWorkspace";
+import AuthGate from "./components/AuthGate";
+import UserMenu from "./components/UserMenu";
 import {
   clearCurrentReceivingDraft,
   createOperationalId,
@@ -112,7 +114,7 @@ type FiscalLookupResult = {
   emitenteCnpj?: string | null;
 };
 
-export default function Home() {
+function HomeInner() {
   const [activeTab, setActiveTab] = useState<TabId>("Recebimento");
   const [scanMode, setScanMode] = useState<ScanMode>("photo");
   const [scanState, setScanState] = useState<"idle" | "reading" | "done">(
@@ -1316,6 +1318,9 @@ export default function Home() {
     <main className="min-h-screen bg-[#eef3f8] text-slate-950">
       <div className="mx-auto flex min-w-0 max-w-7xl flex-col gap-4 px-3 py-3 pb-24 sm:gap-5 sm:px-6 sm:py-4 sm:pb-6 lg:px-8">
         <header className="no-print overflow-hidden rounded-2xl bg-[#09233f] text-white shadow-sm">
+          <div className="flex justify-end px-4 pt-3 sm:px-5 md:px-7">
+            <UserMenu />
+          </div>
           <div className="grid gap-5 p-4 sm:gap-6 sm:p-5 md:grid-cols-[1.1fr_0.9fr] md:p-7">
             <section className="flex flex-col justify-between gap-6 sm:gap-8">
               <div className="flex items-start gap-3">
@@ -3514,5 +3519,13 @@ function IconWhatsapp({ className }: IconProps) {
         strokeLinejoin="round"
       />
     </svg>
+  );
+}
+
+export default function Home() {
+  return (
+    <AuthGate>
+      <HomeInner />
+    </AuthGate>
   );
 }

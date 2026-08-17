@@ -170,11 +170,56 @@ export type StoredInventoryRecord = {
   finalizedAt: string | null;
 };
 
-const CURRENT_RECEIVING_KEY = "stockscan-pro:recebimento-atual";
-const RECEIVING_RECORDS_KEY = "stockscan-pro:recebimentos:v1";
-const INVENTORY_RECORDS_KEY = "stockscan-pro:inventarios:v1";
-const FISCAL_DOCUMENTS_KEY = "stockscan-pro:documentos-fiscais:v1";
-const ACCOUNTING_SHIPMENTS_KEY = "stockscan-pro:remessas-contabeis:v1";
+// Sufixos das chaves (a chave real gravada no localStorage e sempre
+// namespaced por usuario: `stockpro:user:<uid>:<sufixo>`, ver readJson/
+// writeJson/removeKey mais abaixo). Os valores legados (sem dono, de antes
+// do login) ficam em LEGACY_KEYS, usados só pelo modulo de migracao
+// (lib/localOperationalMigration.ts) — nunca lidos/escritos diretamente por
+// aqui depois que o namespacing entrou em vigor.
+const CURRENT_RECEIVING_KEY = "recebimento-atual";
+const RECEIVING_RECORDS_KEY = "recebimentos:v1";
+const INVENTORY_RECORDS_KEY = "inventarios:v1";
+const FISCAL_DOCUMENTS_KEY = "documentos-fiscais:v1";
+const ACCOUNTING_SHIPMENTS_KEY = "remessas-contabeis:v1";
+
+export const LEGACY_KEYS = {
+  CURRENT_RECEIVING: "stockscan-pro:recebimento-atual",
+  RECEIVING_RECORDS: "stockscan-pro:recebimentos:v1",
+  INVENTORY_RECORDS: "stockscan-pro:inventarios:v1",
+  FISCAL_DOCUMENTS: "stockscan-pro:documentos-fiscais:v1",
+  ACCOUNTING_SHIPMENTS: "stockscan-pro:remessas-contabeis:v1",
+} as const;
+
+// Mapa sufixo -> chave legada correspondente, para o modulo de migracao
+// copiar cada chave antiga para o namespace certo do usuario.
+export const LEGACY_KEY_BY_SUFFIX: Record<string, string> = {
+  [CURRENT_RECEIVING_KEY]: LEGACY_KEYS.CURRENT_RECEIVING,
+  [RECEIVING_RECORDS_KEY]: LEGACY_KEYS.RECEIVING_RECORDS,
+  [INVENTORY_RECORDS_KEY]: LEGACY_KEYS.INVENTORY_RECORDS,
+  [FISCAL_DOCUMENTS_KEY]: LEGACY_KEYS.FISCAL_DOCUMENTS,
+  [ACCOUNTING_SHIPMENTS_KEY]: LEGACY_KEYS.ACCOUNTING_SHIPMENTS,
+};
+
+let activeUid: string | null = null;
+
+// Define qual usuario (UID do Firebase) esta ativo — todo readJson/writeJson/
+// removeKey a partir daqui passa a operar só no namespace desse usuario.
+// Chamado pelo AuthProvider: com o UID depois de login (e apos a migracao/
+// decisao sobre dados legados), com null no logout. Enquanto for null,
+// leituras devolvem o fallback e escritas nao fazem nada — nunca se le nem
+// se grava em uma chave "anonima" novamente.
+export function setActiveOperationalUser(uid: string | null) {
+  activeUid = uid;
+}
+
+export function getActiveOperationalUser() {
+  return activeUid;
+}
+
+function namespacedKey(suffix: string): string | null {
+  if (!activeUid) return null;
+  return `stockpro:user:${activeUid}:${suffix}`;
+}
 
 export function createOperationalId(prefix: string) {
   const random =
@@ -597,8 +642,10 @@ function accountingShipmentPeriod(documents: FiscalDocumentRecord[]) {
   return first === last ? first : `${first} — ${last}`;
 }
 
-function readJson<T>(key: string, fallback: T): T {
+function readJson<T>(suffix: string, fallback: T): T {
   if (typeof window === "undefined") return fallback;
+  const key = namespacedKey(suffix);
+  if (!key) return fallback; // sem usuario ativo: nunca ler dado de outro dono
   try {
     const raw = window.localStorage.getItem(key);
     return raw ? (JSON.parse(raw) as T) : fallback;
@@ -607,8 +654,10 @@ function readJson<T>(key: string, fallback: T): T {
   }
 }
 
-function writeJson<T>(key: string, value: T) {
+function writeJson<T>(suffix: string, value: T) {
   if (typeof window === "undefined") return;
+  const key = namespacedKey(suffix);
+  if (!key) return; // sem usuario ativo: nunca escrever em chave anonima
   try {
     window.localStorage.setItem(key, JSON.stringify(value));
   } catch {
@@ -616,8 +665,10 @@ function writeJson<T>(key: string, value: T) {
   }
 }
 
-function removeKey(key: string) {
+function removeKey(suffix: string) {
   if (typeof window === "undefined") return;
+  const key = namespacedKey(suffix);
+  if (!key) return;
   try {
     window.localStorage.removeItem(key);
   } catch {

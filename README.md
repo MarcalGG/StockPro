@@ -102,6 +102,51 @@ O app agora tem duas partes: o front-end (sempre funcionou 100% no navegador) e 
 9. Depois do primeiro deploy, rode o seed **contra o banco de producao** (uma vez so, da sua maquina): `DATABASE_URL="<a mesma da Vercel>" ADMIN_EMAIL=... ADMIN_PASSWORD=... npm run db:seed`. Isso cria a empresa e o primeiro usuario administrador.
 10. Acesse `https://seu-site.vercel.app/login` com esse e-mail/senha para configurar o certificado.
 
+## Login com Google (Firebase Authentication)
+
+O login **principal** do app operacional (Recebimento, Conferência, Inventário, Relatórios, Documentos)
+é feito com Google, via Firebase Authentication — não é o mesmo login do certificado fiscal (ver seção
+abaixo, `/login/admin`).
+
+Como funciona:
+
+- Botão único **"Continuar com Google"** em `/login`. Não há cadastro por e-mail/senha nem formulário
+  separado — a primeira autenticação Google já cria a identidade do usuário.
+- **Desktop**: login por popup. **Mobile** (Android/iPhone/iPad): login por redirect, porque popups são
+  bloqueados/pouco confiáveis em muitos navegadores móveis; o resultado é recuperado no carregamento
+  seguinte da página.
+- A sessão é administrada inteiramente pelo SDK do Firebase (nenhum token é salvo manualmente em
+  `localStorage`/`sessionStorage`/cookie por este app).
+- **Sem allowlist nesta fase**: qualquer conta Google pode entrar. Cada conta recebe seu próprio espaço
+  isolado de dados (namespace por UID no `localStorage`, ver abaixo) — mas não há controle de quem pode
+  acessar o aplicativo. Isso é uma limitação conhecida, não um bug; controle de acesso fica para uma fase
+  futura com backend próprio para o app operacional.
+- **Proteção é só client-side nesta fase.** Não existe validação de sessão no servidor para as telas
+  operacionais (`/`, `/documentos`) — o gate roda inteiramente no navegador. Quando houver um backend
+  persistente para esses dados, a validação server-side (verificação de ID token do Firebase) deve ser
+  adicionada antes de esse app ser considerado seguro contra acesso direto às APIs.
+- Sem as variáveis de ambiente configuradas, a tela mostra "O login com Google ainda não está
+  configurado neste ambiente" e o botão fica desabilitado — o build e o app continuam funcionando
+  normalmente.
+- Dados antigos do navegador (de antes de existir login) nunca são migrados automaticamente: no primeiro
+  login, se houver dados sem dono, o app pergunta explicitamente se você quer associá-los à conta atual;
+  o original nunca é apagado, só copiado.
+
+Configuração:
+
+1. Crie um projeto Firebase próprio para o StockPro (nunca reaproveite a config de outro projeto).
+2. Em Authentication > Sign-in method, ative o provedor **Google**.
+3. Em Authentication > Settings > Authorized domains, adicione `localhost` (dev) e o domínio da Vercel.
+4. Preencha `NEXT_PUBLIC_FIREBASE_API_KEY`, `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN`,
+   `NEXT_PUBLIC_FIREBASE_PROJECT_ID`, `NEXT_PUBLIC_FIREBASE_APP_ID` em `.env.local` (dev) e nas
+   variáveis de ambiente da Vercel (produção).
+
+## Login administrativo (área fiscal) — `/login/admin`
+
+Continua existindo, sem nenhuma mudança: login por e-mail/senha (`ADMIN_EMAIL`/`ADMIN_PASSWORD` do seed),
+cookie de sessão assinado (`lib/auth.ts`), protegendo só `/configuracoes` e as rotas de API fiscais
+(certificado A1, sincronização SEFAZ, remessas para contabilidade). Não tem relação com o login Google.
+
 ## Certificado Digital A1 e sincronizacao de NF-e/CT-e
 
 Como funciona, tecnicamente:
