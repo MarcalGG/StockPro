@@ -1,10 +1,11 @@
 import { PrismaClient } from "./generated/prisma/client";
 import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
 
-// Singleton do Prisma Client. Em desenvolvimento, o Next.js recarrega
-// modulos a cada mudanca de arquivo (hot reload); sem esse cache global,
-// cada reload criaria uma nova conexao com o banco, esgotando o limite de
-// conexoes do SQLite/Postgres rapidamente.
+// Singleton preguicoso do Prisma Client (ver getPrismaInstance/Proxy mais
+// abaixo). Em desenvolvimento, o Next.js recarrega modulos a cada mudanca
+// de arquivo (hot reload); sem o cache em globalThis, cada reload criaria
+// uma nova conexao com o banco, esgotando o limite de conexoes do
+// SQLite/Postgres rapidamente.
 //
 // NOTA IMPORTANTE PARA PRODUCAO (Postgres): troque o adapter abaixo por
 // PrismaPg (pacote "@prisma/adapter-pg"), conforme o comentario no final
@@ -26,11 +27,32 @@ function createPrismaClient() {
   return new PrismaClient({ adapter });
 }
 
-export const prisma = globalThis.__prisma ?? createPrismaClient();
-
-if (process.env.NODE_ENV !== "production") {
-  globalThis.__prisma = prisma;
+// Inicializacao preguicosa: o client real so e criado no primeiro uso
+// efetivo (primeira propriedade acessada em "prisma"), nunca na avaliacao
+// do modulo. Isso evita que importar este arquivo — direta ou
+// transitivamente, ex. via lib/auth.ts em rotas que nunca tocam o banco,
+// como /api/auth/logout — exija DATABASE_URL, e evita que o build do
+// Next.js falhe na etapa de coleta de dados de pagina quando a variavel
+// nao esta disponivel nesse momento. O cache em globalThis garante uma
+// unica instancia por processo (sobrevive a hot reload em dev; em runtime
+// normal so e criada uma vez, na primeira query real).
+function getPrismaInstance(): PrismaClient {
+  if (!globalThis.__prisma) {
+    globalThis.__prisma = createPrismaClient();
+  }
+  return globalThis.__prisma;
 }
+
+export const prisma: PrismaClient = new Proxy({} as PrismaClient, {
+  get(_target, prop) {
+    const instance = getPrismaInstance();
+    const value = Reflect.get(instance as object, prop, instance);
+    return typeof value === "function" ? value.bind(instance) : value;
+  },
+  has(_target, prop) {
+    return Reflect.has(getPrismaInstance() as object, prop);
+  },
+});
 
 // --- Para migrar de SQLite (dev) para Postgres (producao) ---
 // 1. `npm install @prisma/adapter-pg pg`
