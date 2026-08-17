@@ -44,6 +44,43 @@ http://localhost:3000
 
 Login administrativo (Configuracoes > Documentos Fiscais): `http://localhost:3000/login`, com o e-mail/senha que voce definiu em `ADMIN_EMAIL`/`ADMIN_PASSWORD`.
 
+### Desenvolvimento local no Windows
+
+Passo a passo completo para rodar o projeto do zero numa máquina Windows (testado com PowerShell/Git Bash):
+
+1. **Node**: use a versão recomendada no `package.json` (`engines.node >= 18.18.0`). Confirme com `node -v`.
+2. **`.env.local`**: nunca crie do zero — copie o exemplo e edite só os valores locais:
+   ```powershell
+   Copy-Item .env.example .env.local
+   ```
+   Gere `CERT_ENCRYPTION_KEY` e `SESSION_SECRET` com o comando indicado dentro do próprio `.env.example`, e defina `ADMIN_EMAIL`/`ADMIN_PASSWORD` só para o primeiro login local. **Nunca reutilize credenciais, connection string ou segredos de produção/Vercel num `.env.local`** — gere valores novos, exclusivos para a máquina de desenvolvimento.
+3. **Binário nativo do SQLite**: se `npm run db:seed` ou qualquer rota que usa banco falhar com `Could not locate the bindings file` (binário `.node` do `better-sqlite3` ausente ou compilado para outra versão/plataforma do Node), reconstrua só o módulo nativo — não precisa reinstalar tudo:
+   ```powershell
+   npm rebuild better-sqlite3 --foreground-scripts
+   ```
+4. **Prisma Client**: gerado automaticamente pelo `postinstall` do `npm install`; se precisar regenerar manualmente (ex. depois de mudar `schema.prisma`):
+   ```powershell
+   npx prisma generate
+   ```
+5. **Banco local**: o projeto não tem migrations oficiais (só `schema.prisma`), então a sincronização do schema é via:
+   ```powershell
+   npm run db:push
+   ```
+6. **Seed**: cria a empresa placeholder e o primeiro admin, usando `ADMIN_EMAIL`/`ADMIN_PASSWORD` do `.env.local`:
+   ```powershell
+   npm run db:seed
+   ```
+7. **Servidor**:
+   ```powershell
+   npm run dev
+   ```
+8. **Confirme que nada sensível será versionado** antes de commitar:
+   ```powershell
+   git check-ignore -v .env.local
+   git check-ignore -v prisma/dev.db
+   ```
+   Ambos devem aparecer como ignorados (`.gitignore` já cobre `.env*` e `/prisma/*.db`) — se algum comando não retornar nada, pare e não commite.
+
 ## Build
 
 ```bash
